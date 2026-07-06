@@ -160,6 +160,7 @@ cython_debug/
 #.idea/
 
 .DS_Store
-src/tracml-library/
+src/trackml-library/
 /data/
 /outputs
+*.zip

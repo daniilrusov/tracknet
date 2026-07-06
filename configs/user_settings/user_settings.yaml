@@ -1,9 +1,8 @@
-project_path: .
+project_path: ${hydra:runtime.cwd}
 
 data:
   train_dirs:
-    - data/trackml/train_100_events
-  blacklist_dir: data/trackml/blacklist_training
+    - ${user_settings.project_path}/outputs/drift_sim
 
 hydra:
   run:

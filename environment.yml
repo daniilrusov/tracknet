@@ -1,13 +1,14 @@
 name: tracknet
 channels:
+  - conda-forge
   - defaults
 dependencies:
-  - python=3.12
+  - python=3.11
   - pip
   - pip:
-      - numpy==2.2.1
+      - numpy==1.26.3
       - pandas==2.2.3
-      - torch==2.5.1
+      - torch==2.2.0
       - tqdm==4.67.1
       - ipykernel==6.29.5
       - torchmetrics==1.6.1
@@ -19,4 +20,5 @@ dependencies:
       - matplotlib==3.10.0
       - kaleido==0.2.1
       - scipy==1.15.1
-      - -e src/trackml-library
+      - pyyaml==6.0.2
+      - bottleneck==1.4.2
