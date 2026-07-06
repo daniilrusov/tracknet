@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from .model import TrackPrediction
+import torch.nn.functional as F
+from .model import TrackPrediction, PointPrediction, StrawTubePrediction
 
 
 class PointInAreaLoss(nn.Module):
@@ -114,4 +115,77 @@ class TrackNetLoss(nn.Module):
         area_size = self.area_size_loss(preds)
         loss = self.alpha * points_in_area + \
             (1 - self.alpha) * area_size
+        return loss.masked_select(target_mask).mean().float()
+
+
+class StrawPointInAreaLoss(nn.Module):
+    """
+    Computes the normalized distance between predicted and true hit positions.
+
+    The loss evaluates how well predicted coordinates match true hit positions, normalized 
+    by predicted search radius:
+
+    PointInAreaLoss = sqrt(
+        ( (x_pred - x_true)^2 + (y_pred - y_true)^2 + (z_pred - z_true)^2 ) / 3 * R_pred^2
+    )
+
+    where (x,y,z)_pred are predicted coordinates and R_pred is the predicted search radius.
+
+    Returns:
+        torch.Tensor: Concatenated loss values for t1 and t2 predictions with shape 
+            (batch_size, 2*seq_len-1).
+    """
+
+    def __init__(self):
+        super(StrawPointInAreaLoss, self).__init__()
+
+    def forward(self, preds: PointPrediction, target: torch.Tensor):
+        if preds['coords_t1'].size(0) != target.size(0):
+            raise ValueError('Shape mismatch! Number of samples in '
+                             'the prediction and target must be equal. '
+                             f'{preds["coords_t1"].size(0) != target.size(0)}')
+
+        if target.shape[-1] < 3:
+            raise ValueError('Target must be 3-dimensional (x, y, z), '
+                             f'but got target.shape[2] = {target.size(2)}')
+
+        t1_coords_diff = preds['coords_t1'] - target
+
+        t1_loss = t1_coords_diff
+
+        # equal to L2 norm, sqrt(sum(x_i^2))
+        t1_loss = torch.norm(t1_loss, dim=-1)
+
+        return t1_loss
+
+
+class StrawTrackNetLoss(nn.Module):
+    """Cross-entropy loss for next straw tube classification."""
+
+    def __init__(self):
+        super(StrawTrackNetLoss, self).__init__()
+
+    def forward(
+        self,
+        preds: StrawTubePrediction,
+        targets: torch.Tensor,
+        target_mask: torch.Tensor
+    ) -> torch.Tensor:
+        logits = preds['tube_logits_t1']
+        if logits.size(0) != targets.size(0):
+            raise ValueError('Shape mismatch! Number of samples in '
+                             'the prediction and target must be equal. '
+                             f'{logits.size(0) != targets.size(0)}')
+
+        if targets.dim() != 2:
+            raise ValueError('Straw tube targets must have shape '
+                             f'(batch_size, seq_len), got {tuple(targets.shape)}')
+
+        num_tubes = logits.size(-1)
+        flat_loss = F.cross_entropy(
+            logits.reshape(-1, num_tubes),
+            targets.reshape(-1),
+            reduction='none'
+        )
+        loss = flat_loss.view_as(targets)
         return loss.masked_select(target_mask).mean().float()

@@ -34,6 +34,28 @@ class MinHitsFilter(TrackFilter):
         return len(track.hits_xyz) >= self.min_hits
 
 
+class MaxHitsFilter(TrackFilter):
+    """
+    Filter tracks based on the minimum number of hits.
+
+    Args:
+        min_hits (int): Minimum number of hits required for a track to be kept. Must be greater than 3.
+
+    Methods:
+        __call__(track: Track) -> bool:
+            Checks if the track has at least the minimum number of hits.
+            Returns True if the track should be kept, False otherwise.
+    """
+
+    def __init__(self, max_hits: int = 100):
+        if max_hits <= 2:
+            raise ValueError("max_hits must be greater than 2")
+        self.max_hits = max_hits
+
+    def __call__(self, track: Track) -> bool:
+        return len(track.hits_xyz) <= self.max_hits
+
+
 class FirstLayerFilter(TrackFilter):
     """
     Filter tracks that don't start from specified detector layers.

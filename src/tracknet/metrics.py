@@ -316,3 +316,40 @@ class HitDensityMetric(Metric):
         if self.total_count > 0:
             return self.total_density.float() / self.total_count
         return torch.tensor(0.0)
+
+
+class StrawHitEfficiencyMetric(Metric):
+    """Accuracy of next straw tube classification."""
+
+    def __init__(self, time_step='t1'):
+        super().__init__()
+        if time_step not in ['t1', 't2']:
+            raise ValueError("time_step must be 't1' or 't2'")
+        self.time_step = time_step
+        self.add_state(
+            "correct_hits",
+            default=torch.tensor(0),
+            dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "total_hits",
+            default=torch.tensor(0),
+            dist_reduce_fx="sum"
+        )
+
+    def update(self, preds: dict, targets: torch.Tensor, target_mask: torch.Tensor):
+        logits = preds['tube_logits_t1']
+        predicted_tubes = torch.argmax(logits, dim=-1)
+
+        # Apply mask for valid predictions
+        mask = target_mask[:, :predicted_tubes.size(1)]
+
+        valid_hits = predicted_tubes[mask] == targets[:, :predicted_tubes.size(1)][mask]
+
+        self.correct_hits += valid_hits.sum()
+        self.total_hits += valid_hits.numel()
+
+    def compute(self):
+        if self.total_hits == 0:
+            return torch.tensor(0.0, device=self.total_hits.device)
+        return self.correct_hits.float() / self.total_hits

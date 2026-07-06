@@ -1,0 +1,8 @@
+_target_: src.tracknet.training.StrawTrackNETModule
+
+input_features: 6
+hidden_features: 1024
+num_tubes: auto
+learning_rate: 0.0001
+batch_first: true
+#hits_normalizer: ${transforms.normalizer}

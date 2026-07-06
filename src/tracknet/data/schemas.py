@@ -101,6 +101,55 @@ class Track:
         return len(self.hits_xyz)
 
 
+@dataclass
+class StrawTrack:
+    event_id: str
+    track_id: int
+    hits_xyz: np.ndarray
+    tube_ids: np.ndarray
+    hit_ids: np.ndarray
+    hits_wp: np.ndarray | None = None
+
+    #@cached_property
+    #def momentum_pt(self) -> float:
+    #    """Transverse momentum pT = sqrt(px^2 + py^2)."""
+    #    return np.sqrt(self.px**2 + self.py**2)
+
+    def __post_init__(self):
+        """
+        Keep straw hits ordered along the detector depth when the feature vector contains
+        z in the third column. The tube class labels and hit ids must follow the same order.
+        """
+        if self.hits_xyz.shape[0] == 0 or self.hits_xyz.shape[1] < 3:
+            return
+
+        sort_idx = np.argsort(self.hits_xyz[:, 2])
+        self.hits_xyz = self.hits_xyz[sort_idx]
+        self.tube_ids = self.tube_ids[sort_idx]
+        self.hit_ids = self.hit_ids[sort_idx]
+        if self.hits_wp is not None:
+            self.hits_wp = self.hits_wp[sort_idx]
+
+    def __repr__(self) -> str:
+        """Detailed representation showing track properties and hit distribution."""
+
+        return (f"Track(\n"
+                f"\tevent_id={self.event_id},\n"
+                f"\ttrack_id={self.track_id},\n"
+                f"\thits={len(self.hits_xyz)},\n"
+                #f"\tpx={self.px:.2f}, py={self.py:.2f}, pz={self.pz:.2f},\n"
+                #f"\tpT={self.momentum_pt:.2f}, charge={self.charge},\n"
+                f")")
+
+    def __str__(self) -> str:
+        """Returns concise string representation focusing on key attributes."""
+        return f"Track {self.track_id} with {len(self.hits_xyz)} hits"#, pT={self.momentum_pt:.2f}"
+
+    def __len__(self) -> int:
+        """Returns the number of hits in the track."""
+        return len(self.hits_xyz)
+
+
 class BatchSample(TypedDict):
     inputs: torch.Tensor
     input_lengths: list[int]

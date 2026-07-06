@@ -1,0 +1,18 @@
+_target_: src.tracknet.data.dataset.StrawTracksDataset
+
+data_dirs: ${data.train_dirs}
+validation_split: 0.2
+data_format: drift_sim
+file_pattern: "*.tsv"
+input_columns: [x0, y0, z0, dr, lr, station]
+num_stations: 8
+tubes_per_station: 151
+tube_id_offset: 0
+tube_id_mapping: station_modulo
+split_seed: ${training.seed}
+
+filters:
+  - _target_: src.tracknet.data.filters.MinHitsFilter
+    min_hits: 3
+  - _target_: src.tracknet.data.filters.MaxHitsFilter
+    max_hits: 8

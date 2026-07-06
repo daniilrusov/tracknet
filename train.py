@@ -1,13 +1,16 @@
+import os
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(os.getcwd(), "outputs", "mplconfig"))
+
 import hydra
 import logging
-import os
 from argparse import ArgumentParser
 from omegaconf import DictConfig
 from hydra.utils import instantiate
 import pytorch_lightning as pl
+import torch
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 
 from src.tracknet.data.collate import collate_fn
 
@@ -26,25 +29,35 @@ def setup_training(cfg: DictConfig):
     # Instantiate datasets with all components from config
     train_dataset = instantiate(cfg.dataset, split='train')
     val_dataset = instantiate(cfg.dataset, split='validation')
+    train_shuffle = cfg.training.shuffle
+    if isinstance(train_dataset, IterableDataset):
+        if train_shuffle:
+            logger.warning("Disabling DataLoader shuffle for IterableDataset.")
+        train_shuffle = False
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
+        shuffle=train_shuffle,
         num_workers=cfg.training.num_workers,
         collate_fn=collate_fn,
-        persistent_workers=True,
+        persistent_workers=cfg.training.num_workers > 0,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=cfg.training.batch_size,
+        shuffle=False,
         num_workers=cfg.training.num_workers,
         collate_fn=collate_fn,
-        persistent_workers=True,
+        persistent_workers=cfg.training.num_workers > 0,
     )
 
     # Instantiate model from config
-    model = instantiate(cfg.model)
+    model_overrides = {}
+    if getattr(cfg.model, "num_tubes", None) == "auto":
+        model_overrides["num_tubes"] = train_dataset.num_tubes
+    model = instantiate(cfg.model, **model_overrides)
 
     return {
         "train_loader": train_loader,
@@ -70,13 +83,16 @@ def train(cfg: DictConfig, components):
 
     trainer = pl.Trainer(
         max_epochs=cfg.training.max_epochs,
-        accelerator="auto",
-        devices=1,
+        accelerator=cfg.training.accelerator,
+        devices=cfg.training.devices,
+        #strategy='ddp_spawn',
+        #distributed_backend='ddp',
         logger=tb_logger,
         callbacks=[checkpoint_callback],
         accumulate_grad_batches=cfg.training.accumulate_grad_batches,
         gradient_clip_val=cfg.training.gradient_clip_val,
         limit_train_batches=cfg.training.limit_train_batches,
+        limit_val_batches=cfg.training.limit_val_batches,
     )
 
     trainer.fit(
@@ -89,10 +105,13 @@ def train(cfg: DictConfig, components):
 
 @hydra.main(version_base=None, config_path="configs", config_name="train")
 def main(cfg: DictConfig) -> None:
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     logging.basicConfig(level=args.loglevel)
 
     pl.seed_everything(cfg.training.seed)
+
+    if cfg.training.matmul_precision is not None:
+        torch.set_float32_matmul_precision(cfg.training.matmul_precision)
 
     components = setup_training(cfg)
     train(cfg, components)

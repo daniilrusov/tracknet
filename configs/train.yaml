@@ -1,26 +1,31 @@
 defaults:
-  - dataset: trackml
-  - model: step_ahead
+  - dataset: drift_sim
+  - model: straw_model
   - user_settings: user_settings
-  - transforms: transforms
+#  - transforms: transforms
   - _self_
 
 data:
   train_dirs: ${user_settings.data.train_dirs}
-  blacklist_dir: ${user_settings.data.blacklist_dir}
+#  blacklist_dir: ${user_settings.data.blacklist_dir}
 
 experiment:
-  name: step_ahead_tracknet_trackml
+  name: straw_tracknet_spd
 
 training:
   seed: 42
-  batch_size: 32
-  max_epochs: 10
-  num_workers: 4
-  accumulate_grad_batches: 1
+  batch_size: 5120
+  max_epochs: 1000
+  num_workers: 8
+  shuffle: true
+  accelerator: gpu
+  devices: 1
+  matmul_precision: high
+  accumulate_grad_batches: 16
   gradient_clip_val: 1.0
   resume_from: null # path to checkpoint
-  limit_train_batches: 1000 # 1.0 for full dataset
+  limit_train_batches: 1.0 # 1.0 for full dataset
+  limit_val_batches: 1.0 # 1.0 for full dataset
 
 logging:
   output_dir: ${hydra:run.dir}/logs
