@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Generator, Literal, Optional, Set
 import numpy as np
 import pandas as pd
+import torch
 from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
 from .schemas import Track, StrawTrack
@@ -588,3 +589,75 @@ class StreamingStrawTracksDataset(IterableDataset):
         for file in self.files:
             for track in self._iter_file_tracks(file, worker_id, num_workers):
                 yield track
+
+
+class PrebatchedStrawTracksDataset(IterableDataset):
+    """
+    Fast iterable dataset for preprocessed drift-sim shards.
+
+    Expected shard format is produced by scripts/preprocess_drift_sim.py. Each
+    shard contains fixed-size tensors for inputs, targets, masks, and lengths,
+    so training does not spend every step parsing TSV files with pandas.
+    """
+
+    prebatched = True
+
+    def __init__(
+        self,
+        cache_dir: str | Path,
+        batch_size: int,
+        split: Literal["train", "validation"] = "train",
+        num_tubes: int = 8 * 151,
+        shuffle_shards: bool = False,
+        split_seed: int = 42,
+        **_,
+    ):
+        if split not in ("train", "validation"):
+            raise ValueError(
+                f"Invalid split value: {split}. Must be 'train' or 'validation'."
+            )
+
+        self.cache_dir = Path(cache_dir)
+        self.split = split
+        self.batch_size = int(batch_size)
+        self.num_tubes = int(num_tubes)
+        self.shuffle_shards = bool(shuffle_shards)
+        self.split_seed = int(split_seed)
+
+        split_dir = self.cache_dir / self.split
+        self.shard_files = sorted(split_dir.glob("*.pt"))
+        if len(self.shard_files) == 0:
+            raise FileNotFoundError(
+                f"No preprocessed {self.split} shards found in {split_dir}. "
+                "Run: python scripts/preprocess_drift_sim.py "
+                "--input-dir outputs/drift_sim --output-dir outputs/drift_sim_cache"
+            )
+
+    def _worker_shards(self) -> list[Path]:
+        shard_files = self.shard_files
+        if self.shuffle_shards:
+            rng = np.random.default_rng(self.split_seed)
+            shard_files = list(rng.permutation(shard_files))
+
+        worker_info = get_worker_info()
+        if worker_info is None:
+            return list(shard_files)
+        return list(shard_files[worker_info.id::worker_info.num_workers])
+
+    def __iter__(self):
+        for shard_file in self._worker_shards():
+            shard = torch.load(shard_file, map_location="cpu")
+            inputs = shard["inputs"].float()
+            targets = shard["targets"].long()
+            target_mask = shard["target_mask"].bool()
+            input_lengths = shard["input_lengths"].long()
+            n_tracks = inputs.size(0)
+
+            for start in range(0, n_tracks, self.batch_size):
+                end = min(start + self.batch_size, n_tracks)
+                yield {
+                    "inputs": inputs[start:end],
+                    "targets": targets[start:end],
+                    "target_mask": target_mask[start:end],
+                    "input_lengths": input_lengths[start:end].tolist(),
+                }

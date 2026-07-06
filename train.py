@@ -29,29 +29,44 @@ def setup_training(cfg: DictConfig):
     # Instantiate datasets with all components from config
     train_dataset = instantiate(cfg.dataset, split='train')
     val_dataset = instantiate(cfg.dataset, split='validation')
-    train_shuffle = cfg.training.shuffle
-    if isinstance(train_dataset, IterableDataset):
-        if train_shuffle:
-            logger.warning("Disabling DataLoader shuffle for IterableDataset.")
-        train_shuffle = False
+    is_prebatched = getattr(train_dataset, "prebatched", False)
+    if is_prebatched:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=None,
+            num_workers=cfg.training.num_workers,
+            persistent_workers=cfg.training.num_workers > 0,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=None,
+            num_workers=cfg.training.num_workers,
+            persistent_workers=cfg.training.num_workers > 0,
+        )
+    else:
+        train_shuffle = cfg.training.shuffle
+        if isinstance(train_dataset, IterableDataset):
+            if train_shuffle:
+                logger.warning("Disabling DataLoader shuffle for IterableDataset.")
+            train_shuffle = False
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=train_shuffle,
-        num_workers=cfg.training.num_workers,
-        collate_fn=collate_fn,
-        persistent_workers=cfg.training.num_workers > 0,
-    )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=cfg.training.batch_size,
+            shuffle=train_shuffle,
+            num_workers=cfg.training.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=cfg.training.num_workers > 0,
+        )
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=False,
-        num_workers=cfg.training.num_workers,
-        collate_fn=collate_fn,
-        persistent_workers=cfg.training.num_workers > 0,
-    )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=cfg.training.batch_size,
+            shuffle=False,
+            num_workers=cfg.training.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=cfg.training.num_workers > 0,
+        )
 
     # Instantiate model from config
     model_overrides = {}

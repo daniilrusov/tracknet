@@ -16,7 +16,7 @@ training:
   seed: 42
   batch_size: 5120
   max_epochs: 1000
-  num_workers: 0
+  num_workers: 2
   shuffle: false
   accelerator: gpu
   devices: 1

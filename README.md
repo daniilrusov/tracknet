@@ -41,7 +41,13 @@ conda activate tracknet
 python scripts/driftsim_v2.py -n 10000 -o outputs/drift_sim --seed 42
 ```
 
-4. Configure settings if needed:
+4. Preprocess drift simulation data into fast training shards:
+
+```bash
+python scripts/preprocess_drift_sim.py --input-dir outputs/drift_sim --output-dir outputs/drift_sim_cache
+```
+
+5. Configure settings if needed:
 
 - Edit `configs/user_settings/user_settings.yaml` for custom paths.
 - Adjust model parameters in `configs/model/straw_model.yaml`.
@@ -65,6 +71,7 @@ For a quick smoke test:
 
 ```bash
 python scripts/driftsim_v2.py -n 1000 -o outputs/drift_sim --seed 42
+python scripts/preprocess_drift_sim.py --input-dir outputs/drift_sim --output-dir outputs/drift_sim_cache --chunk-size 50000 --shard-size 10000
 python train.py training.max_epochs=1 training.batch_size=256 training.num_workers=2 training.limit_train_batches=5 training.limit_val_batches=2
 ```
 
