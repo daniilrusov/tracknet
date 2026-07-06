@@ -1,0 +1,6 @@
+events: 100
+seed: 42
+output_dir: outputs/drift_sim
+data_filename: output.tsv
+config_filename: config.yaml
+seed_lock_filename: seed.lock
