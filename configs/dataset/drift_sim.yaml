@@ -1,9 +1,10 @@
-_target_: src.tracknet.data.dataset.StrawTracksDataset
+_target_: src.tracknet.data.dataset.StreamingStrawTracksDataset
 
 data_dirs: ${data.train_dirs}
 validation_split: 0.2
 data_format: drift_sim
 file_pattern: "*.tsv"
+chunk_size: 1000000
 input_columns: [x0, y0, z0, dr, lr, station]
 num_stations: 8
 tubes_per_station: 151

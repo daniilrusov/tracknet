@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 from typing import Generator, Literal, Optional, Set
 import numpy as np
@@ -389,3 +390,201 @@ class StrawTracksDataset(Dataset):
 
     def __getitem__(self, index: int) -> StrawTrack:
         return self.tracks[index]
+
+
+class StreamingStrawTracksDataset(IterableDataset):
+    """
+    Streaming dataset for large drift-sim straw files.
+
+    Unlike StrawTracksDataset, this class does not concatenate all input files or
+    build the full track list in memory. It reads TSV/CSV files in chunks, keeps
+    only one incomplete event between chunks, and yields tracks lazily.
+    """
+
+    def __init__(
+        self,
+        data_dirs: str | Path | list[str | Path],
+        blacklist_dir: Optional[str | Path] = None,
+        transforms: Optional[list] = None,
+        filters: Optional[list[TrackFilter]] = None,
+        validation_split: float = 0.1,
+        split: Literal["train", "validation"] = "train",
+        data_format: Literal["drift_sim", "spd_prod4"] = "drift_sim",
+        file_pattern: Optional[str] = None,
+        input_columns: Optional[list[str]] = None,
+        num_stations: int = 8,
+        tubes_per_station: int = 151,
+        tube_id_offset: int = 0,
+        tube_id_mapping: Literal["station_modulo", "station_offset"] = "station_modulo",
+        split_seed: int = 42,
+        chunk_size: int = 1_000_000,
+    ):
+        if blacklist_dir is not None:
+            raise ValueError("StreamingStrawTracksDataset does not support blacklist_dir.")
+        if tube_id_mapping == "dense_wireid":
+            raise ValueError("StreamingStrawTracksDataset does not support dense_wireid mapping.")
+        if split not in ("train", "validation"):
+            raise ValueError(
+                f"Invalid split value: {split}. Must be 'train' or 'validation'."
+            )
+
+        if isinstance(data_dirs, (str, Path)):
+            data_dirs = [data_dirs]
+        self.data_dirs = [Path(data_dir) for data_dir in data_dirs]
+        self.transforms = transforms or []
+        self.filter_pipeline = FilterPipeline(filters)
+        self.validation_split = validation_split
+        self.split = split
+        self.data_format = data_format
+        self.file_pattern = file_pattern or (
+            "*.tsv" if data_format == "drift_sim"
+            else "ana_r.MC2025_S1.minbias-P8-spdroot417-dev.10GeV-UU.PROD2025-004.RECO.1.*.root"
+        )
+        self.input_columns = input_columns or (
+            ["x0", "y0", "z0", "dr", "lr", "station"]
+            if data_format == "drift_sim"
+            else ["wp1x", "wp1y", "wp1z", "wp2x", "wp2y", "wp2z"]
+        )
+        self.num_stations = num_stations
+        self.tubes_per_station = tubes_per_station
+        self.tube_id_offset = tube_id_offset
+        self.tube_id_mapping = tube_id_mapping
+        self.split_seed = split_seed
+        self.chunk_size = chunk_size
+        self.num_tubes = self.num_stations * self.tubes_per_station
+
+        self.files = []
+        for data_dir in self.data_dirs:
+            self.files.extend(sorted(data_dir.glob(self.file_pattern)))
+        if len(self.files) == 0:
+            raise FileNotFoundError(
+                f"No straw data files matching '{self.file_pattern}' in {self.data_dirs}"
+            )
+
+    def _event_hash_int(self, event_id, salt: str) -> int:
+        payload = f"{salt}:{self.split_seed}:{event_id}".encode("utf-8")
+        return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "big")
+
+    def _event_matches_split(self, event_id) -> bool:
+        value = self._event_hash_int(event_id, "split") / 2**64
+        is_validation = value < self.validation_split
+        return is_validation if self.split == "validation" else not is_validation
+
+    def _event_matches_worker(self, event_id, worker_id: int, num_workers: int) -> bool:
+        if num_workers <= 1:
+            return True
+        return self._event_hash_int(event_id, "worker") % num_workers == worker_id
+
+    def _read_file_chunks(self, file: Path):
+        if self.data_format == "drift_sim":
+            return pd.read_csv(
+                file,
+                sep=r"\s+",
+                names=DRIFT_SIM_COLUMNS,
+                engine="python",
+                chunksize=self.chunk_size,
+            )
+        return pd.read_csv(file, chunksize=self.chunk_size)
+
+    def _tube_class_ids(self, group: pd.DataFrame) -> np.ndarray:
+        if self.data_format == "drift_sim":
+            station = group["station"].astype(int).to_numpy()
+            if np.any(station < 1) or np.any(station > self.num_stations):
+                bad_station = int(station[(station < 1) | (station > self.num_stations)][0])
+                raise ValueError(
+                    f"Station id {bad_station} is outside [1, {self.num_stations}]."
+                )
+
+            raw_tube_id = group["wireid"].astype(int).to_numpy() % 1000
+            tube_id = raw_tube_id - self.tube_id_offset
+            if self.tube_id_mapping == "station_modulo":
+                tube_id = np.mod(tube_id, self.tubes_per_station)
+            elif np.any((tube_id < 0) | (tube_id >= self.tubes_per_station)):
+                bad_tube = int(tube_id[(tube_id < 0) | (tube_id >= self.tubes_per_station)][0])
+                raise ValueError(
+                    f"Tube id {bad_tube} is outside [0, {self.tubes_per_station}). "
+                    "Use tube_id_mapping='station_modulo' or adjust tube_id_offset."
+                )
+
+            return ((station - 1) * self.tubes_per_station + tube_id).astype(np.int64)
+
+        tube_column = "wireid" if "wireid" in group.columns else "hit_id"
+        return group[tube_column].astype(int).to_numpy().astype(np.int64)
+
+    def _process_event(self, event_id, event) -> list[StrawTrack]:
+        tracks = []
+        for tr_id, group in event.groupby("tr_id", sort=False):
+            if "station" in group.columns:
+                group = group.sort_values("station")
+            elif "z0" in group.columns:
+                group = group.sort_values("z0")
+
+            track = StrawTrack(
+                event_id=event_id,
+                track_id=tr_id,
+                hits_xyz=group[self.input_columns].values,
+                tube_ids=self._tube_class_ids(group),
+                hit_ids=group["hit_id"].values,
+                hits_wp=(
+                    group[["wpx", "wpy", "wpz"]].values
+                    if {"wpx", "wpy", "wpz"}.issubset(group.columns)
+                    else None
+                ),
+            )
+            tracks.append(track)
+        return tracks
+
+    def _iter_complete_events(self, df: pd.DataFrame):
+        for event_id, event in df.groupby("ev_id", sort=False):
+            yield event_id, event
+
+    def _iter_file_tracks(self, file: Path, worker_id: int, num_workers: int):
+        carry = None
+        next_hit_id = 0
+
+        for chunk in self._read_file_chunks(file):
+            chunk = chunk.copy()
+            chunk["hit_id"] = np.arange(next_hit_id, next_hit_id + len(chunk))
+            next_hit_id += len(chunk)
+
+            if carry is not None and len(carry) > 0:
+                chunk = pd.concat([carry, chunk], ignore_index=True)
+
+            last_event_id = chunk["ev_id"].iloc[-1]
+            complete = chunk[chunk["ev_id"] != last_event_id]
+            carry = chunk[chunk["ev_id"] == last_event_id]
+
+            if len(complete) == 0:
+                continue
+
+            for event_id, event in self._iter_complete_events(complete):
+                if not self._event_matches_split(event_id):
+                    continue
+                if not self._event_matches_worker(event_id, worker_id, num_workers):
+                    continue
+                for track in self._process_event(event_id, event):
+                    for transform in self.transforms:
+                        track = transform(track)
+                    if self.filter_pipeline(track):
+                        yield track
+
+        if carry is not None and len(carry) > 0:
+            for event_id, event in self._iter_complete_events(carry):
+                if not self._event_matches_split(event_id):
+                    continue
+                if not self._event_matches_worker(event_id, worker_id, num_workers):
+                    continue
+                for track in self._process_event(event_id, event):
+                    for transform in self.transforms:
+                        track = transform(track)
+                    if self.filter_pipeline(track):
+                        yield track
+
+    def __iter__(self) -> Generator[StrawTrack, None, None]:
+        worker_info = get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else 0
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+
+        for file in self.files:
+            for track in self._iter_file_tracks(file, worker_id, num_workers):
+                yield track
