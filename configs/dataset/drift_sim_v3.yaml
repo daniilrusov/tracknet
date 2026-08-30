@@ -1,0 +1,9 @@
+_target_: src.tracknet.data.dataset.PrebatchedStrawTracksDataset
+
+cache_dir: ${user_settings.project_path}/outputs/drift_sim_v3_cache
+batch_size: ${training.batch_size}
+num_tubes: 1456
+split_seed: ${training.seed}
+shuffle_shards: true
+shuffle_tracks: true
+schema_version: 3

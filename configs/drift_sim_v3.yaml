@@ -1,0 +1,27 @@
+schema_version: 3
+events: 100
+seed: 42
+output_dir: outputs/drift_sim_v3
+data_filename: output.tsv
+config_filename: config.yaml
+metadata_filename: metadata.yaml
+seed_lock_filename: seed.lock
+
+detector:
+  half_size_mm: 750.0
+  tube_pitch_mm: 10.0
+  z_min_mm: 0.0
+  z_max_mm: 240.0
+  plane_types: [X, Y, U, V, X, Y, U, V]
+
+simulation:
+  vertex_min_mm: -700.0
+  vertex_max_mm: 700.0
+  tracks_per_event_min: 1
+  tracks_per_event_max_exclusive: 10
+  pt_min_mev: 100.0
+  pt_max_mev: 1000.0
+  # Exact V1/V2 upper bound: 2 * 3.14156.
+  phi_max_rad: 6.28312
+  efficiency: 1.0
+  noise_hits_per_event: 0

@@ -92,11 +92,11 @@ class TrackNETModule(pl.LightningModule):
         batch_size = batch['inputs'].size(0)
         self.log('train_loss', loss, prog_bar=True, batch_size=batch_size)
         self.log_dict({
-            "train_search_area_t1": self.train_search_area_t1.compute(),
-            "train_hit_efficiency_t1": self.train_hit_efficiency_t1.compute(),
-            "train_search_area_t2": self.train_search_area_t2.compute(),
-            "train_hit_efficiency_t2": self.train_hit_efficiency_t2.compute()
-        }, prog_bar=True, batch_size=batch_size)
+            "train_search_area_t1": self.train_search_area_t1,
+            "train_hit_efficiency_t1": self.train_hit_efficiency_t1,
+            "train_search_area_t2": self.train_search_area_t2,
+            "train_hit_efficiency_t2": self.train_hit_efficiency_t2,
+        }, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -115,21 +115,27 @@ class TrackNETModule(pl.LightningModule):
         batch_size = batch['inputs'].size(0)
         self.log('val_loss', loss, prog_bar=True, batch_size=batch_size)
         metrics_dict = {
-            "val_search_area_t1": self.val_search_area_t1.compute(),
-            "val_search_area_t2": self.val_search_area_t2.compute(),
-            "val_hit_efficiency_t1": self.val_hit_efficiency_t1.compute(),
-            "val_hit_efficiency_t2": self.val_hit_efficiency_t2.compute(),
+            "val_search_area_t1": self.val_search_area_t1,
+            "val_search_area_t2": self.val_search_area_t2,
+            "val_hit_efficiency_t1": self.val_hit_efficiency_t1,
+            "val_hit_efficiency_t2": self.val_hit_efficiency_t2,
         }
 
         if hasattr(self, 'val_hit_density_t1'):
             self.val_hit_density_t1.update(output, batch['target_mask'])
             self.val_hit_density_t2.update(output, batch['target_mask'])
             metrics_dict.update({
-                "val_hit_density_t1": self.val_hit_density_t1.compute(),
-                "val_hit_density_t2": self.val_hit_density_t2.compute()
+                "val_hit_density_t1": self.val_hit_density_t1,
+                "val_hit_density_t2": self.val_hit_density_t2,
             })
 
-        self.log_dict(metrics_dict, prog_bar=True, batch_size=batch_size)
+        self.log_dict(
+            metrics_dict,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
 
         # Save last batch for visualization
         if batch_idx == 0:
@@ -258,9 +264,14 @@ class StrawTrackNETModule(pl.LightningModule):
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('train_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
-        self.log_dict({
-            "train_hit_efficiency_t1": self.train_hit_efficiency_t1.compute()
-        }, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.log(
+            "train_hit_efficiency_t1",
+            self.train_hit_efficiency_t1,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -274,11 +285,14 @@ class StrawTrackNETModule(pl.LightningModule):
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('val_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
-        metrics_dict = {
-            "val_hit_efficiency_t1": self.val_hit_efficiency_t1.compute()
-        }
-
-        self.log_dict(metrics_dict, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.log(
+            "val_hit_efficiency_t1",
+            self.val_hit_efficiency_t1,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=batch_size,
+        )
 
         # Save last batch for visualization
         if batch_idx == 0:

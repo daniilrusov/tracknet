@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from hydra.utils import instantiate
 import pytorch_lightning as pl
 import torch
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader, IterableDataset
 
@@ -93,8 +93,19 @@ def train(cfg: DictConfig, components):
         filename="{epoch}-{val_loss:.2f}",
         monitor="val_loss",
         save_top_k=3,
+        save_last=True,
         mode="min"
     )
+    callbacks = [checkpoint_callback]
+    early_stopping_patience = cfg.training.get("early_stopping_patience")
+    if early_stopping_patience is not None:
+        callbacks.append(
+            EarlyStopping(
+                monitor="val_loss",
+                patience=int(early_stopping_patience),
+                mode="min",
+            )
+        )
 
     trainer = pl.Trainer(
         max_epochs=cfg.training.max_epochs,
@@ -103,11 +114,16 @@ def train(cfg: DictConfig, components):
         #strategy='ddp_spawn',
         #distributed_backend='ddp',
         logger=tb_logger,
-        callbacks=[checkpoint_callback],
+        callbacks=callbacks,
         accumulate_grad_batches=cfg.training.accumulate_grad_batches,
         gradient_clip_val=cfg.training.gradient_clip_val,
         limit_train_batches=cfg.training.limit_train_batches,
         limit_val_batches=cfg.training.limit_val_batches,
+        precision=cfg.training.get("precision", "32-true"),
+        log_every_n_steps=int(cfg.training.get("log_every_n_steps", 50)),
+        check_val_every_n_epoch=int(
+            cfg.training.get("check_val_every_n_epoch", 1)
+        ),
     )
 
     trainer.fit(
@@ -123,7 +139,7 @@ def main(cfg: DictConfig) -> None:
     args, _ = parser.parse_known_args()
     logging.basicConfig(level=args.loglevel)
 
-    pl.seed_everything(cfg.training.seed)
+    pl.seed_everything(cfg.training.seed, workers=True)
 
     if cfg.training.matmul_precision is not None:
         torch.set_float32_matmul_precision(cfg.training.matmul_precision)

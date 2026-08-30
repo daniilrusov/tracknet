@@ -609,7 +609,9 @@ class PrebatchedStrawTracksDataset(IterableDataset):
         split: Literal["train", "validation"] = "train",
         num_tubes: int = 8 * 151,
         shuffle_shards: bool = False,
+        shuffle_tracks: bool = False,
         split_seed: int = 42,
+        schema_version: str | int | None = None,
         **_,
     ):
         if split not in ("train", "validation"):
@@ -621,8 +623,37 @@ class PrebatchedStrawTracksDataset(IterableDataset):
         self.split = split
         self.batch_size = int(batch_size)
         self.num_tubes = int(num_tubes)
-        self.shuffle_shards = bool(shuffle_shards)
+        self.shuffle_shards = bool(shuffle_shards) and split == "train"
+        self.shuffle_tracks = bool(shuffle_tracks) and split == "train"
         self.split_seed = int(split_seed)
+        self._iteration = 0
+
+        metadata_path = self.cache_dir / "metadata.pt"
+        if schema_version is not None and not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Dataset schema {schema_version} requires cache metadata: "
+                f"{metadata_path}"
+            )
+        if metadata_path.exists():
+            metadata = torch.load(metadata_path, map_location="cpu")
+            metadata_num_tubes = metadata.get("num_tubes")
+            if metadata_num_tubes is not None and int(metadata_num_tubes) != self.num_tubes:
+                raise ValueError(
+                    f"Dataset config has num_tubes={self.num_tubes}, but cache "
+                    f"metadata has num_tubes={metadata_num_tubes}."
+                )
+            if schema_version is not None:
+                expected_schema = (
+                    "v3"
+                    if str(schema_version).lower() in ("3", "v3")
+                    else str(schema_version)
+                )
+                actual_schema = str(metadata.get("schema_version", "legacy")).lower()
+                if actual_schema != expected_schema:
+                    raise ValueError(
+                        f"Dataset config expects schema {expected_schema}, but cache "
+                        f"metadata reports {actual_schema}."
+                    )
 
         split_dir = self.cache_dir / self.split
         self.shard_files = sorted(split_dir.glob("*.pt"))
@@ -633,10 +664,10 @@ class PrebatchedStrawTracksDataset(IterableDataset):
                 "--input-dir outputs/drift_sim --output-dir outputs/drift_sim_cache"
             )
 
-    def _worker_shards(self) -> list[Path]:
+    def _worker_shards(self, iteration: int) -> list[Path]:
         shard_files = self.shard_files
         if self.shuffle_shards:
-            rng = np.random.default_rng(self.split_seed)
+            rng = np.random.default_rng(self.split_seed + iteration)
             shard_files = list(rng.permutation(shard_files))
 
         worker_info = get_worker_info()
@@ -645,19 +676,32 @@ class PrebatchedStrawTracksDataset(IterableDataset):
         return list(shard_files[worker_info.id::worker_info.num_workers])
 
     def __iter__(self):
-        for shard_file in self._worker_shards():
+        iteration = self._iteration
+        self._iteration += 1
+        for shard_file in self._worker_shards(iteration):
             shard = torch.load(shard_file, map_location="cpu")
             inputs = shard["inputs"].float()
             targets = shard["targets"].long()
             target_mask = shard["target_mask"].bool()
             input_lengths = shard["input_lengths"].long()
             n_tracks = inputs.size(0)
+            order = None
+            if self.shuffle_tracks:
+                payload = (
+                    f"track-order:{self.split_seed}:{iteration}:{shard_file.name}"
+                ).encode("utf-8")
+                order_seed = int.from_bytes(
+                    hashlib.blake2b(payload, digest_size=8).digest(), "big"
+                )
+                generator = torch.Generator().manual_seed(order_seed)
+                order = torch.randperm(n_tracks, generator=generator)
 
             for start in range(0, n_tracks, self.batch_size):
                 end = min(start + self.batch_size, n_tracks)
+                selection = slice(start, end) if order is None else order[start:end]
                 yield {
-                    "inputs": inputs[start:end],
-                    "targets": targets[start:end],
-                    "target_mask": target_mask[start:end],
-                    "input_lengths": input_lengths[start:end].tolist(),
+                    "inputs": inputs[selection],
+                    "targets": targets[selection],
+                    "target_mask": target_mask[selection],
+                    "input_lengths": input_lengths[selection].tolist(),
                 }

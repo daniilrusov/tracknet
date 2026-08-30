@@ -1,0 +1,30 @@
+defaults:
+  - dataset: drift_sim_v3_1m
+  - model: straw_model
+  - user_settings: user_settings
+  - _self_
+
+experiment:
+  name: straw_tracknet_v3_1m
+
+training:
+  seed: 42
+  batch_size: 1024
+  max_epochs: 100
+  num_workers: 4
+  shuffle: false
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  matmul_precision: high
+  accumulate_grad_batches: 4
+  gradient_clip_val: 1.0
+  early_stopping_patience: 10
+  log_every_n_steps: 20
+  check_val_every_n_epoch: 1
+  resume_from: null
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+
+logging:
+  output_dir: ${hydra:run.dir}/logs
