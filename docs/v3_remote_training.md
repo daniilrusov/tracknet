@@ -77,6 +77,10 @@ python -u scripts/preprocess_drift_sim.py \
 ```
 
 Preprocessor проверяет metadata, station/local/class ids и создаёт независимые `train/` и `validation/` shards.
+Текущая схема входа сохраняет пять полей: `x0, y0, z0, dr, station`; `lr` в модель
+не передаётся. Модель нормализует непрерывные признаки внутри `forward`, а `station`
+использует только как индекс общего embedding плоскости X/Y/U/V. После перехода со
+старой шестипризнаковой схемы cache необходимо создать заново.
 
 ### Обучение
 
@@ -87,19 +91,26 @@ python -u train.py --config-name=train_v3_1m \
 
 Профиль использует:
 
-- batch size `1024`;
-- gradient accumulation `4` — effective batch `4096`;
+- batch size `8000`;
+- `8` data-loader workers and shuffled train shards/tracks;
+- gradient accumulation `4` — effective batch `32000`;
 - `16-mixed` precision;
-- максимум 100 эпох;
-- early stopping после 10 validation-эпох без улучшения;
-- три лучших checkpoint и отдельный `last.ckpt`.
+- максимум 1000 эпох;
+- early stopping после 20 validation-эпох без улучшения;
+- три лучших checkpoint и отдельный `last.ckpt`;
+- geometry-aware cross-entropy: 10% целевой массы распределяется между соседними
+  трубками в пределах той же станции (радиус две трубки).
+
+Checkpoint старой модели с входом `x0,y0,z0,dr,lr,station` нельзя использовать для
+resume новой архитектуры: размер входной матрицы GRU изменился. Обучение новой версии
+нужно начинать с нуля.
 
 Если GPU не хватает памяти, сохранить effective batch можно так:
 
 ```bash
 python -u train.py --config-name=train_v3_1m \
-  training.batch_size=512 \
-  training.accumulate_grad_batches=8 \
+  training.batch_size=1000 \
+  training.accumulate_grad_batches=32 \
   2>&1 | tee outputs/v3_train_1m.log
 ```
 

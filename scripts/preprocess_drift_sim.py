@@ -18,7 +18,7 @@ DRIFT_SIM_COLUMNS = [
 ]
 V3_REQUIRED_COLUMNS = {
     "schema_version", "ev_id", "tr_id", "station", "wireid",
-    "local_tube_id", "tube_class_id", "x0", "y0", "z0", "dr", "lr",
+    "local_tube_id", "tube_class_id", "x0", "y0", "z0", "dr",
 }
 
 
@@ -269,7 +269,7 @@ def parse_args():
     parser.add_argument(
         "--input-columns",
         nargs="+",
-        default=["x0", "y0", "z0", "dr", "lr", "station"],
+        default=["x0", "y0", "z0", "dr", "station"],
     )
     return parser.parse_args()
 

@@ -133,22 +133,60 @@ class StepAheadTrackNET(nn.Module):
 
 
 class StrawTrackNET(nn.Module):
-    """GRU encoder with a per-step classifier over straw tube ids."""
+    """GRU encoder with normalized geometry and a per-step tube classifier.
+
+    The current straw input schema is ``[x0, y0, z0, dr, station]``. Continuous
+    detector coordinates are normalized to roughly ``[-1, 1]`` and the station
+    number is used only to select a learned X/Y/U/V plane embedding. The legacy
+    six-feature path is retained for loading checkpoints created before this
+    representation was introduced.
+    """
 
     def __init__(self,
-                 input_features=6,
+                 input_features=5,
                  hidden_features=128,
                  num_tubes: int | None = None,
                  output_features: int | None = None,
-                 batch_first=True):
+                 batch_first=True,
+                 use_plane_embedding: bool = True,
+                 plane_embedding_dim: int = 8,
+                 continuous_feature_center=(0.0, 0.0, 120.0, 2.5),
+                 continuous_feature_scale=(750.0, 750.0, 120.0, 2.5)):
         super().__init__()
         if num_tubes is None:
             num_tubes = output_features if output_features is not None else 8000
+        if use_plane_embedding and input_features != 5:
+            raise ValueError(
+                "Plane-embedded straw inputs must contain exactly "
+                "[x0, y0, z0, dr, station]."
+            )
+        if plane_embedding_dim <= 0:
+            raise ValueError("plane_embedding_dim must be positive.")
 
         self.input_features = input_features
         self.num_tubes = num_tubes
+        self.use_plane_embedding = bool(use_plane_embedding)
+        self.plane_embedding_dim = int(plane_embedding_dim)
+
+        rnn_input_features = input_features
+        if self.use_plane_embedding:
+            center = torch.as_tensor(continuous_feature_center, dtype=torch.float32)
+            scale = torch.as_tensor(continuous_feature_scale, dtype=torch.float32)
+            if center.shape != (4,) or scale.shape != (4,):
+                raise ValueError(
+                    "continuous_feature_center and continuous_feature_scale "
+                    "must each contain four values for x0, y0, z0 and dr."
+                )
+            if torch.any(scale <= 0):
+                raise ValueError("All continuous feature scales must be positive.")
+            self.register_buffer("continuous_feature_center", center)
+            self.register_buffer("continuous_feature_scale", scale)
+            self.plane_embedding = nn.Embedding(4, self.plane_embedding_dim)
+            rnn_input_features = 4 + self.plane_embedding_dim
+
+        self.rnn_input_features = rnn_input_features
         self.rnn = nn.GRU(
-            input_size=input_features,
+            input_size=rnn_input_features,
             hidden_size=hidden_features,
             num_layers=2,
             batch_first=batch_first
@@ -157,6 +195,36 @@ class StrawTrackNET(nn.Module):
         self.tube_classifier = nn.Sequential(
             nn.Linear(hidden_features, num_tubes)
         )
+
+    def encode_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Normalize continuous inputs and replace station with an XYUV embedding."""
+        if inputs.size(-1) != self.input_features:
+            raise ValueError(
+                f"Expected {self.input_features} input features, got {inputs.size(-1)}."
+            )
+        if not self.use_plane_embedding:
+            return inputs
+
+        continuous = (
+            inputs[..., :4] - self.continuous_feature_center
+        ) / self.continuous_feature_scale
+        station = inputs[..., 4]
+        rounded_station = station.round()
+        non_padding = station != 0
+        invalid_station = non_padding & (
+            (station - rounded_station).abs() > 1e-4
+        )
+        invalid_station |= non_padding & (
+            (rounded_station < 1) | (rounded_station > 8)
+        )
+        if torch.any(invalid_station):
+            bad_station = float(station[invalid_station][0].detach().cpu())
+            raise ValueError(f"Station id {bad_station} is outside integer range [1, 8].")
+
+        # Stations 1/5, 2/6, 3/7 and 4/8 share X, Y, U and V embeddings.
+        plane_ids = (rounded_station.long() - 1).remainder(4)
+        plane_features = self.plane_embedding(plane_ids)
+        return torch.cat((continuous, plane_features), dim=-1)
 
     def forward(self, inputs: torch.Tensor, input_lengths: list[int]) -> StrawTubePrediction:
         """
@@ -168,7 +236,7 @@ class StrawTrackNET(nn.Module):
             StrawTubePrediction: A dictionary containing:
             - 'tube_logits_t1' (torch.Tensor): next-tube logits for every input step
         """
-        x = inputs
+        x = self.encode_inputs(inputs)
         packed = torch.nn.utils.rnn.pack_padded_sequence(
             x, input_lengths, enforce_sorted=False, batch_first=True)
         x, _ = self.rnn(packed)

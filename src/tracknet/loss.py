@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -160,17 +162,101 @@ class StrawPointInAreaLoss(nn.Module):
 
 
 class StrawTrackNetLoss(nn.Module):
-    """Cross-entropy loss for next straw tube classification."""
+    """Cross-entropy with geometry-aware smoothing over neighboring tubes.
 
-    def __init__(self):
+    Unlike ordinary label smoothing, probability mass is assigned only to
+    physically adjacent local tube ids inside the same detector station. It is
+    never allowed to cross a station class boundary.
+    """
+
+    def __init__(
+        self,
+        station_tube_counts: list[int] | tuple[int, ...] | None = None,
+        neighbor_smoothing: float = 0.0,
+        neighbor_radius: int = 2,
+        neighbor_sigma: float = 1.0,
+    ):
         super(StrawTrackNetLoss, self).__init__()
+        if not 0.0 <= neighbor_smoothing < 1.0:
+            raise ValueError("neighbor_smoothing must be in [0, 1).")
+        if neighbor_radius < 1:
+            raise ValueError("neighbor_radius must be at least 1.")
+        if neighbor_sigma <= 0:
+            raise ValueError("neighbor_sigma must be positive.")
+        if neighbor_smoothing > 0 and not station_tube_counts:
+            raise ValueError(
+                "station_tube_counts are required when neighbor smoothing is enabled."
+            )
+
+        counts = torch.as_tensor(station_tube_counts or [], dtype=torch.long)
+        if counts.numel() and torch.any(counts <= 0):
+            raise ValueError("All station tube counts must be positive.")
+        offsets = torch.cat((torch.zeros(1, dtype=torch.long), counts.cumsum(0)[:-1]))
+        boundaries = counts.cumsum(0)[:-1]
+        self.register_buffer("station_tube_counts", counts)
+        self.register_buffer("station_offsets", offsets)
+        self.register_buffer("station_boundaries", boundaries)
+        self.neighbor_smoothing = float(neighbor_smoothing)
+        self.neighbor_radius = int(neighbor_radius)
+        self.neighbor_sigma = float(neighbor_sigma)
+
+    def _per_target_losses(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_tubes = logits.size(-1)
+        flat_targets = targets.reshape(-1)
+        log_probs = F.log_softmax(logits.reshape(-1, num_tubes).float(), dim=-1)
+        hard_nll = -log_probs.gather(1, flat_targets[:, None]).squeeze(1)
+        if self.neighbor_smoothing == 0.0:
+            return hard_nll, hard_nll, hard_nll
+        if int(self.station_tube_counts.sum()) != num_tubes:
+            raise ValueError(
+                f"Geometry defines {int(self.station_tube_counts.sum())} tubes, "
+                f"but logits contain {num_tubes} classes."
+            )
+
+        station_indexes = torch.bucketize(
+            flat_targets,
+            self.station_boundaries,
+            right=True,
+        )
+        station_offsets = self.station_offsets[station_indexes]
+        station_counts = self.station_tube_counts[station_indexes]
+        local_targets = flat_targets - station_offsets
+        neighbor_nll_sum = torch.zeros_like(hard_nll)
+        neighbor_weight_sum = torch.zeros_like(hard_nll)
+
+        for distance in range(1, self.neighbor_radius + 1):
+            weight = math.exp(-0.5 * (distance / self.neighbor_sigma) ** 2)
+            for direction in (-1, 1):
+                neighbor_local = local_targets + direction * distance
+                valid = (neighbor_local >= 0) & (neighbor_local < station_counts)
+                neighbor_targets = flat_targets + direction * distance
+                safe_targets = neighbor_targets.clamp(0, num_tubes - 1)
+                neighbor_nll = -log_probs.gather(
+                    1, safe_targets[:, None]
+                ).squeeze(1)
+                neighbor_nll_sum += torch.where(
+                    valid, neighbor_nll * weight, torch.zeros_like(neighbor_nll)
+                )
+                neighbor_weight_sum += valid.to(log_probs.dtype) * weight
+
+        neighbor_nll = neighbor_nll_sum / neighbor_weight_sum.clamp_min(1e-12)
+        smoothed_nll = (
+            (1.0 - self.neighbor_smoothing) * hard_nll
+            + self.neighbor_smoothing * neighbor_nll
+        )
+        return smoothed_nll, hard_nll, neighbor_nll
 
     def forward(
         self,
         preds: StrawTubePrediction,
         targets: torch.Tensor,
-        target_mask: torch.Tensor
-    ) -> torch.Tensor:
+        target_mask: torch.Tensor,
+        return_components: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         logits = preds['tube_logits_t1']
         if logits.size(0) != targets.size(0):
             raise ValueError('Shape mismatch! Number of samples in '
@@ -181,11 +267,17 @@ class StrawTrackNetLoss(nn.Module):
             raise ValueError('Straw tube targets must have shape '
                              f'(batch_size, seq_len), got {tuple(targets.shape)}')
 
-        num_tubes = logits.size(-1)
-        flat_loss = F.cross_entropy(
-            logits.reshape(-1, num_tubes),
-            targets.reshape(-1),
-            reduction='none'
-        )
-        loss = flat_loss.view_as(targets)
-        return loss.masked_select(target_mask).mean().float()
+        if logits.shape[:2] != targets.shape or target_mask.shape != targets.shape:
+            raise ValueError(
+                "Logit sequence, targets and target_mask must share batch/step dimensions."
+            )
+
+        smoothed_nll, hard_nll, neighbor_nll = self._per_target_losses(logits, targets)
+        flat_mask = target_mask.reshape(-1)
+        loss = smoothed_nll[flat_mask].mean().float()
+        if not return_components:
+            return loss
+        return loss, {
+            "hard_ce": hard_nll[flat_mask].mean().float(),
+            "neighbor_ce": neighbor_nll[flat_mask].mean().float(),
+        }

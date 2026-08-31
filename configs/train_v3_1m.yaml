@@ -9,17 +9,17 @@ experiment:
 
 training:
   seed: 42
-  batch_size: 1024
-  max_epochs: 100
-  num_workers: 4
-  shuffle: false
+  batch_size: 8000
+  max_epochs: 1000
+  num_workers: 8
+  shuffle: true
   accelerator: gpu
   devices: 1
   precision: 16-mixed
   matmul_precision: high
   accumulate_grad_batches: 4
   gradient_clip_val: 1.0
-  early_stopping_patience: 10
+  early_stopping_patience: 20
   log_every_n_steps: 20
   check_val_every_n_epoch: 1
   resume_from: null

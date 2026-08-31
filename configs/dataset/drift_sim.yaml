@@ -5,3 +5,5 @@ batch_size: ${training.batch_size}
 num_tubes: 1208
 split_seed: ${training.seed}
 shuffle_shards: true
+input_columns: [x0, y0, z0, dr, station]
+station_tube_counts: [151, 151, 151, 151, 151, 151, 151, 151]

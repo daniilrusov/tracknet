@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import sys
+import types
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,7 +38,8 @@ DRIFT_SIM_COLUMNS = [
     "ev_id", "wireid", "dr", "lr", "station", "tr_id",
     "x", "y", "x0", "y0", "z0",
 ]
-INPUT_COLUMNS = ["x0", "y0", "z0", "dr", "lr", "station"]
+LEGACY_INPUT_COLUMNS = ["x0", "y0", "z0", "dr", "lr", "station"]
+GEOMETRY_INPUT_COLUMNS = ["x0", "y0", "z0", "dr", "station"]
 TOP_K = (1, 3, 5, 10)
 
 
@@ -288,13 +290,14 @@ def iter_tracks(
     min_hits: int,
     max_hits: int,
     schema: DatasetSchema,
+    input_columns: list[str],
 ) -> Iterator[TrackRecord]:
     for _, event in iter_complete_events(path, chunk_size, schema.version):
         for _, group in event.groupby("tr_id", sort=False):
             group = group.sort_values("station")
             if not min_hits <= len(group) <= max_hits:
                 continue
-            hits = group[INPUT_COLUMNS].to_numpy(dtype=np.float32, copy=True)
+            hits = group[input_columns].to_numpy(dtype=np.float32, copy=True)
             stations = group["station"].to_numpy(dtype=np.int64, copy=True)
             tube_ids = tube_class_ids(group, schema)
             yield TrackRecord(
@@ -317,13 +320,45 @@ def batched(records: Iterable[TrackRecord], batch_size: int) -> Iterator[list[Tr
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[StrawTrackNET, dict]:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    except ModuleNotFoundError as error:
+        if error.name != "lightning_fabric":
+            raise
+
+        # Lightning stores its dict-like hyperparameter wrapper by import path.
+        # Evaluation only needs it to behave as a plain dict, so provide a narrow
+        # compatibility shim when Lightning is not installed in the inference env.
+        fabric_module = types.ModuleType("lightning_fabric")
+        utilities_module = types.ModuleType("lightning_fabric.utilities")
+        data_module = types.ModuleType("lightning_fabric.utilities.data")
+        attribute_dict = type(
+            "AttributeDict",
+            (dict,),
+            {"__module__": "lightning_fabric.utilities.data"},
+        )
+        data_module.AttributeDict = attribute_dict
+        fabric_module.utilities = utilities_module
+        utilities_module.data = data_module
+        sys.modules["lightning_fabric"] = fabric_module
+        sys.modules["lightning_fabric.utilities"] = utilities_module
+        sys.modules["lightning_fabric.utilities.data"] = data_module
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
     hparams = checkpoint.get("hyper_parameters", checkpoint.get("hyperparameters", {}))
+    use_plane_embedding = bool(hparams.get("use_plane_embedding", False))
     model = StrawTrackNET(
         input_features=int(hparams.get("input_features", 6)),
         hidden_features=int(hparams.get("hidden_features", 128)),
         num_tubes=int(hparams.get("num_tubes", 1208)),
         batch_first=bool(hparams.get("batch_first", True)),
+        use_plane_embedding=use_plane_embedding,
+        plane_embedding_dim=int(hparams.get("plane_embedding_dim", 8)),
+        continuous_feature_center=hparams.get(
+            "continuous_feature_center", (0.0, 0.0, 120.0, 2.5)
+        ),
+        continuous_feature_scale=hparams.get(
+            "continuous_feature_scale", (750.0, 750.0, 120.0, 2.5)
+        ),
     )
     model_state = {
         key.removeprefix("model."): value
@@ -346,7 +381,8 @@ def make_batch(
     max_len: int,
 ) -> tuple[torch.Tensor, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     batch_size = len(records)
-    inputs = np.zeros((batch_size, max_len, len(INPUT_COLUMNS)), dtype=np.float32)
+    input_features = records[0].inputs.shape[1]
+    inputs = np.zeros((batch_size, max_len, input_features), dtype=np.float32)
     targets = np.zeros((batch_size, max_len), dtype=np.int64)
     mask = np.zeros((batch_size, max_len), dtype=bool)
     source_stations = np.zeros((batch_size, max_len), dtype=np.int64)
@@ -438,6 +474,11 @@ def evaluate(args: argparse.Namespace) -> dict:
         )
     max_len = args.max_hits - 1
     num_tubes = model.num_tubes
+    input_columns = (
+        GEOMETRY_INPUT_COLUMNS
+        if model.use_plane_embedding
+        else LEGACY_INPUT_COLUMNS
+    )
     class_to_station = torch.from_numpy(schema.class_to_station).to(device)
     class_to_station_np = schema.class_to_station
     class_to_local_np = schema.class_to_local_tube
@@ -457,6 +498,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         args.min_hits,
         args.max_hits,
         schema,
+        input_columns,
     )
     progress = tqdm(batched(records, args.batch_size), desc="Evaluating", unit="batch")
     for batch_records in progress:
@@ -466,7 +508,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         # Padding is only appended after each valid prefix, so running the GRU on
         # the fixed seven-step tensor gives identical valid-step outputs and avoids
         # pack/unpack overhead during this large, inference-only pass.
-        recurrent_output, _ = model.rnn(inputs.to(device))
+        recurrent_output, _ = model.rnn(model.encode_inputs(inputs.to(device)))
         logits = model.tube_classifier(recurrent_output)
         targets_device = torch.from_numpy(targets).to(device)
         mask_device = torch.from_numpy(mask).to(device)

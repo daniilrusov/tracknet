@@ -84,7 +84,7 @@ class DatasetSchemaTests(unittest.TestCase):
 class _SingleBatchDataset(IterableDataset):
     def __iter__(self):
         yield {
-            "inputs": torch.zeros(2, 2, 6),
+            "inputs": torch.zeros(2, 2, 5),
             "targets": torch.ones(2, 2, dtype=torch.long),
             "target_mask": torch.ones(2, 2, dtype=torch.bool),
             "input_lengths": [2, 2],
@@ -93,7 +93,12 @@ class _SingleBatchDataset(IterableDataset):
 
 class _EpochControlledModule(StrawTrackNETModule):
     def __init__(self):
-        super().__init__(input_features=6, hidden_features=4, num_tubes=4)
+        super().__init__(
+            input_features=5,
+            hidden_features=4,
+            num_tubes=4,
+            station_tube_counts=(4,),
+        )
 
     def forward(self, batch):
         prediction = 1 if self.current_epoch == 0 else 2
@@ -146,7 +151,7 @@ class PrebatchedShuffleTests(unittest.TestCase):
             for split in ("train", "validation"):
                 split_dir = cache_dir / split
                 split_dir.mkdir()
-                inputs = torch.zeros(12, 2, 6)
+                inputs = torch.zeros(12, 2, 5)
                 inputs[:, 0, 0] = torch.arange(12)
                 torch.save(
                     {

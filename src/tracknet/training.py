@@ -217,12 +217,20 @@ class TrackNETModule(pl.LightningModule):
 class StrawTrackNETModule(pl.LightningModule):
     def __init__(
         self,
-        input_features: int = 6,
+        input_features: int = 5,
         hidden_features: int = 128,
-        num_tubes: int = 8000,
+        num_tubes: int = 1456,
         output_features: Optional[int] = None,
         learning_rate: float = 1e-3,
         batch_first: bool = True,
+        use_plane_embedding: bool = True,
+        plane_embedding_dim: int = 8,
+        continuous_feature_center=(0.0, 0.0, 120.0, 2.5),
+        continuous_feature_scale=(750.0, 750.0, 120.0, 2.5),
+        station_tube_counts=(151, 151, 213, 213, 151, 151, 213, 213),
+        neighbor_smoothing: float = 0.1,
+        neighbor_radius: int = 2,
+        neighbor_sigma: float = 1.0,
         hit_density_stats_path: Optional[str] = None,
         hits_normalizer: Optional[MinMaxNormalizeXYZ] = None
     ):
@@ -234,11 +242,20 @@ class StrawTrackNETModule(pl.LightningModule):
             input_features=input_features,
             hidden_features=hidden_features,
             num_tubes=num_tubes if output_features is None else output_features,
-            batch_first=batch_first
+            batch_first=batch_first,
+            use_plane_embedding=use_plane_embedding,
+            plane_embedding_dim=plane_embedding_dim,
+            continuous_feature_center=continuous_feature_center,
+            continuous_feature_scale=continuous_feature_scale,
         )
 
         # Loss
-        self.loss_fn = StrawTrackNetLoss()
+        self.loss_fn = StrawTrackNetLoss(
+            station_tube_counts=station_tube_counts,
+            neighbor_smoothing=neighbor_smoothing,
+            neighbor_radius=neighbor_radius,
+            neighbor_sigma=neighbor_sigma,
+        )
 
         # Metrics
         self.train_hit_efficiency_t1 = StrawHitEfficiencyMetric('t1')
@@ -255,7 +272,12 @@ class StrawTrackNETModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         output = self(batch)
-        loss = self.loss_fn(output, batch['targets'], batch['target_mask'])
+        loss, loss_components = self.loss_fn(
+            output,
+            batch['targets'],
+            batch['target_mask'],
+            return_components=True,
+        )
 
         # Update metrics
         self.train_hit_efficiency_t1.update(
@@ -264,6 +286,18 @@ class StrawTrackNETModule(pl.LightningModule):
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('train_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.log(
+            'train_hard_ce',
+            loss_components['hard_ce'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'train_neighbor_ce',
+            loss_components['neighbor_ce'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
         self.log(
             "train_hit_efficiency_t1",
             self.train_hit_efficiency_t1,
@@ -276,7 +310,12 @@ class StrawTrackNETModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         output = self(batch)
-        loss = self.loss_fn(output, batch['targets'], batch['target_mask'])
+        loss, loss_components = self.loss_fn(
+            output,
+            batch['targets'],
+            batch['target_mask'],
+            return_components=True,
+        )
 
         # Update metrics
         self.val_hit_efficiency_t1.update(
@@ -285,6 +324,19 @@ class StrawTrackNETModule(pl.LightningModule):
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('val_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.log(
+            'val_hard_ce',
+            loss_components['hard_ce'],
+            prog_bar=True,
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'val_neighbor_ce',
+            loss_components['neighbor_ce'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
         self.log(
             "val_hit_efficiency_t1",
             self.val_hit_efficiency_t1,

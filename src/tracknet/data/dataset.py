@@ -245,7 +245,7 @@ class StrawTracksDataset(Dataset):
             else "ana_r.MC2025_S1.minbias-P8-spdroot417-dev.10GeV-UU.PROD2025-004.RECO.1.*.root"
         )
         self.input_columns = input_columns or (
-            ['x0', 'y0', 'z0', 'dr', 'lr', 'station']
+            ['x0', 'y0', 'z0', 'dr', 'station']
             if data_format == "drift_sim"
             else ['wp1x', 'wp1y', 'wp1z', 'wp2x', 'wp2y', 'wp2z']
         )
@@ -442,7 +442,7 @@ class StreamingStrawTracksDataset(IterableDataset):
             else "ana_r.MC2025_S1.minbias-P8-spdroot417-dev.10GeV-UU.PROD2025-004.RECO.1.*.root"
         )
         self.input_columns = input_columns or (
-            ["x0", "y0", "z0", "dr", "lr", "station"]
+            ["x0", "y0", "z0", "dr", "station"]
             if data_format == "drift_sim"
             else ["wp1x", "wp1y", "wp1z", "wp2x", "wp2y", "wp2z"]
         )
@@ -612,6 +612,8 @@ class PrebatchedStrawTracksDataset(IterableDataset):
         shuffle_tracks: bool = False,
         split_seed: int = 42,
         schema_version: str | int | None = None,
+        input_columns: Optional[list[str]] = None,
+        station_tube_counts: Optional[list[int]] = None,
         **_,
     ):
         if split not in ("train", "validation"):
@@ -623,6 +625,19 @@ class PrebatchedStrawTracksDataset(IterableDataset):
         self.split = split
         self.batch_size = int(batch_size)
         self.num_tubes = int(num_tubes)
+        self.station_tube_counts = (
+            [int(count) for count in station_tube_counts]
+            if station_tube_counts is not None
+            else None
+        )
+        if (
+            self.station_tube_counts is not None
+            and sum(self.station_tube_counts) != self.num_tubes
+        ):
+            raise ValueError(
+                f"station_tube_counts sum to {sum(self.station_tube_counts)}, "
+                f"but num_tubes={self.num_tubes}."
+            )
         self.shuffle_shards = bool(shuffle_shards) and split == "train"
         self.shuffle_tracks = bool(shuffle_tracks) and split == "train"
         self.split_seed = int(split_seed)
@@ -642,6 +657,37 @@ class PrebatchedStrawTracksDataset(IterableDataset):
                     f"Dataset config has num_tubes={self.num_tubes}, but cache "
                     f"metadata has num_tubes={metadata_num_tubes}."
                 )
+            metadata_input_columns = metadata.get("input_columns")
+            if input_columns is not None and metadata_input_columns != input_columns:
+                raise ValueError(
+                    f"Dataset config expects input_columns={input_columns}, but cache "
+                    f"metadata has input_columns={metadata_input_columns}. Regenerate "
+                    "the cache with scripts/preprocess_drift_sim.py."
+                )
+            source_stations = metadata.get("source_metadata", {}).get(
+                "detector", {}
+            ).get("stations", [])
+            source_station_tube_counts = (
+                [int(station["tube_count"]) for station in source_stations]
+                if source_stations
+                else None
+            )
+            if (
+                self.station_tube_counts is not None
+                and source_station_tube_counts is not None
+                and self.station_tube_counts != source_station_tube_counts
+            ):
+                raise ValueError(
+                    "Dataset station_tube_counts do not match cache source geometry: "
+                    f"{self.station_tube_counts} != {source_station_tube_counts}."
+                )
+            if self.station_tube_counts is None:
+                if source_stations:
+                    self.station_tube_counts = source_station_tube_counts
+                elif metadata.get("tubes_per_station") is not None:
+                    self.station_tube_counts = [
+                        int(metadata["tubes_per_station"])
+                    ] * int(metadata.get("num_stations", 8))
             if schema_version is not None:
                 expected_schema = (
                     "v3"

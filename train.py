@@ -72,6 +72,14 @@ def setup_training(cfg: DictConfig):
     model_overrides = {}
     if getattr(cfg.model, "num_tubes", None) == "auto":
         model_overrides["num_tubes"] = train_dataset.num_tubes
+    if getattr(cfg.model, "station_tube_counts", None) == "auto":
+        station_tube_counts = getattr(train_dataset, "station_tube_counts", None)
+        if station_tube_counts is None:
+            raise ValueError(
+                "Model requests automatic station_tube_counts, but dataset "
+                "metadata does not define detector station geometry."
+            )
+        model_overrides["station_tube_counts"] = station_tube_counts
     model = instantiate(cfg.model, **model_overrides)
 
     return {
