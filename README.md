@@ -113,6 +113,8 @@ The evaluator reports cross-entropy, MRR, top-k hit recall, exact-track
 survival, and detailed breakdowns by hit position, station transition, track
 length, and tube class. It auto-detects legacy or V3 data, validates the V3
 metadata and 1456-class geometry, and records dataset/checkpoint SHA-256 hashes.
+For new checkpoints it reads `seed_hits` from the checkpoint, so a model trained
+with two seed tubes is scored starting with the third tube.
 
 ## Results and Outputs
 

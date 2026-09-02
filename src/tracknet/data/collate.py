@@ -69,8 +69,8 @@ def collate_fn(batch: list[Track]) -> BatchSample:
     """
     Collate function for straw-tube TrackNET training.
 
-    The model receives parameters of tubes already crossed by the particle and
-    predicts the concrete next tube class.
+    The first two tubes are seed hits. The model starts supervised prediction
+    after consuming both seeds, so its first target is the third tube.
 
     Args:
         batch (List[Track]): A list of Track objects to be batched.
@@ -112,8 +112,9 @@ def collate_fn(batch: list[Track]) -> BatchSample:
         # input: hits[:-1], target: hits[1:]
         inputs[i, :n, :] = torch.tensor(hits[:-1], dtype=torch.float32)
         targets[i, :n] = torch.tensor(tube_ids[1:], dtype=torch.long)
-        # Set mask for valid positions
-        target_mask[i, :n] = True  # t1 predictions
+        # Position zero predicts tube 2 from tube 1 and is warm-up only.
+        # Supervision starts at position one: tubes 1+2 -> tube 3.
+        target_mask[i, 1:n] = True
         input_lengths.append(n)
 
     # 4) Return batched data

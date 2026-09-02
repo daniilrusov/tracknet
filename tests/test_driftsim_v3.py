@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +79,29 @@ class DriftSimV3GeometryTests(unittest.TestCase):
 
 
 class DriftSimV3OutputTests(unittest.TestCase):
+    def test_preprocessed_supervision_starts_with_third_hit(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_dir = Path(temporary_dir)
+            writer = preprocess_drift_sim.SplitShardWriter(
+                output_dir,
+                split="train",
+                shard_size=1,
+                max_len=3,
+                n_features=5,
+            )
+            hits = np.arange(20, dtype=np.float32).reshape(4, 5)
+            tube_ids = np.array([10, 20, 30, 40], dtype=np.int16)
+            writer.add(hits, tube_ids)
+
+            shard = torch.load(output_dir / "train" / "shard_000000.pt")
+            torch.testing.assert_close(shard["inputs"][0], torch.from_numpy(hits[:-1]))
+            torch.testing.assert_close(
+                shard["targets"][0], torch.tensor([20, 30, 40], dtype=torch.int16)
+            )
+            torch.testing.assert_close(
+                shard["target_mask"][0], torch.tensor([False, True, True])
+            )
+
     def test_output_is_deterministic_and_preprocessor_validates_ids(self):
         config = driftsim_v3.default_config()
         config["events"] = 20

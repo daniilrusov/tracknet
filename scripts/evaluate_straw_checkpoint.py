@@ -3,7 +3,8 @@
 
 The report contains micro top-k recall, cross-entropy, MRR, track-level recall,
 and breakdowns by prediction step, target station, station transition, track
-length, and target tube class.
+length, and target tube class. Scoring starts after the number of seed hits
+stored in the checkpoint (or after one seed hit for legacy checkpoints).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import json
 import math
 import sys
 import types
+from collections.abc import Mapping, Sequence
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +43,21 @@ DRIFT_SIM_COLUMNS = [
 LEGACY_INPUT_COLUMNS = ["x0", "y0", "z0", "dr", "lr", "station"]
 GEOMETRY_INPUT_COLUMNS = ["x0", "y0", "z0", "dr", "station"]
 TOP_K = (1, 3, 5, 10)
+
+
+def to_jsonable(value):
+    """Convert checkpoint metadata containers to plain JSON-compatible values."""
+    if isinstance(value, Mapping):
+        return {str(key): to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [to_jsonable(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    if torch.is_tensor(value):
+        return value.item() if value.numel() == 1 else value.tolist()
+    return value
 
 
 @dataclass
@@ -139,6 +156,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
     parser.add_argument("--min-hits", type=int, default=3)
     parser.add_argument("--max-hits", type=int, default=8)
+    parser.add_argument(
+        "--seed-hits",
+        type=int,
+        help="Known hits before scoring starts (default: checkpoint seed_hits or 1).",
+    )
     parser.add_argument(
         "--schema-version",
         choices=["auto", "legacy", "v3"],
@@ -371,7 +393,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[StrawTrackN
         "epoch": int(checkpoint.get("epoch", -1)),
         "global_step": int(checkpoint.get("global_step", -1)),
         "pytorch_lightning_version": checkpoint.get("pytorch-lightning_version"),
-        "hyper_parameters": hparams,
+        "hyper_parameters": to_jsonable(hparams),
     }
     return model, checkpoint_info
 
@@ -459,6 +481,12 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 def evaluate(args: argparse.Namespace) -> dict:
     device = torch.device(args.device)
     model, checkpoint_info = load_model(args.checkpoint, device)
+    checkpoint_seed_hits = int(
+        checkpoint_info.get("hyper_parameters", {}).get("seed_hits", 1)
+    )
+    seed_hits = checkpoint_seed_hits if args.seed_hits is None else int(args.seed_hits)
+    if seed_hits < 1:
+        raise ValueError("seed_hits must be at least 1.")
     schema = load_dataset_schema(args)
     if schema.data_filename is not None and schema.data_filename != args.data.name:
         raise ValueError(
@@ -473,6 +501,11 @@ def evaluate(args: argparse.Namespace) -> dict:
             f"{schema.version} dataset defines {schema.num_tubes}."
         )
     max_len = args.max_hits - 1
+    warmup_steps = seed_hits - 1
+    if max_len <= warmup_steps:
+        raise ValueError(
+            f"max_hits={args.max_hits} leaves no targets after {seed_hits} seed hits."
+        )
     num_tubes = model.num_tubes
     input_columns = (
         GEOMETRY_INPUT_COLUMNS
@@ -505,6 +538,13 @@ def evaluate(args: argparse.Namespace) -> dict:
         inputs, targets, mask, source_stations, target_stations, lengths = make_batch(
             batch_records, max_len
         )
+        target_lengths = lengths.copy()
+        supervised_lengths = target_lengths - warmup_steps
+        if np.any(supervised_lengths <= 0):
+            raise ValueError(
+                f"Every evaluated track must contain more than {seed_hits} hits."
+            )
+        mask[:, :warmup_steps] = False
         # Padding is only appended after each valid prefix, so running the GRU on
         # the fixed seven-step tensor gives identical valid-step outputs and avoids
         # pack/unpack overhead during this large, inference-only pass.
@@ -546,8 +586,10 @@ def evaluate(args: argparse.Namespace) -> dict:
         flat_targets = targets[mask]
         flat_source = source_stations[mask]
         flat_target_station = target_stations[mask]
-        flat_steps = np.broadcast_to(np.arange(1, max_len + 1), mask.shape)[mask]
-        flat_lengths = np.repeat(lengths, lengths)
+        absolute_steps = np.broadcast_to(np.arange(1, max_len + 1), mask.shape)[mask]
+        flat_steps = absolute_steps - warmup_steps
+        flat_target_hit_numbers = absolute_steps + 1
+        flat_track_hits = np.repeat(target_lengths + 1, supervised_lengths)
 
         overall.update(nll_np, ranks_np, topk_correct)
         station_masked_overall.update(
@@ -555,10 +597,10 @@ def evaluate(args: argparse.Namespace) -> dict:
         )
         for dimension, values in (
             ("prediction_step", flat_steps),
-            ("target_hit_number", flat_steps + 1),
+            ("target_hit_number", flat_target_hit_numbers),
             ("source_station", flat_source),
             ("target_station", flat_target_station),
-            ("track_hits", flat_lengths + 1),
+            ("track_hits", flat_track_hits),
         ):
             for value in np.unique(values):
                 group_mask = values == value
@@ -587,7 +629,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             )
 
         offset = 0
-        for length in lengths:
+        for length in supervised_lengths:
             end = offset + int(length)
             track_top1_recall_sum += float(topk_correct[1][offset:end].mean())
             for k in TOP_K:
@@ -649,6 +691,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             "batch_size": args.batch_size,
             "min_hits": args.min_hits,
             "max_hits": args.max_hits,
+            "seed_hits": seed_hits,
             "tracks": tracks,
             "target_station_top1_accuracy": station_correct / overall.support,
             "mean_track_top1_recall": track_top1_recall_sum / tracks,

@@ -97,7 +97,6 @@ class _EpochControlledModule(StrawTrackNETModule):
             input_features=5,
             hidden_features=4,
             num_tubes=4,
-            station_tube_counts=(4,),
         )
 
     def forward(self, batch):

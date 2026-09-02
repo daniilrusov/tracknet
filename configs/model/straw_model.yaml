@@ -10,8 +10,6 @@ plane_embedding_dim: 8
 # Normalize [x0, y0, z0, dr] to approximately [-1, 1].
 continuous_feature_center: [0.0, 0.0, 120.0, 2.5]
 continuous_feature_scale: [750.0, 750.0, 120.0, 2.5]
-station_tube_counts: auto
-neighbor_smoothing: 0.1
-neighbor_radius: 2
-neighbor_sigma: 1.0
+# The first prediction included in loss is tube 3 after two seed tubes.
+seed_hits: 2
 #hits_normalizer: ${transforms.normalizer}

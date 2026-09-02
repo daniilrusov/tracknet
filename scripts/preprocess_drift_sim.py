@@ -20,6 +20,7 @@ V3_REQUIRED_COLUMNS = {
     "schema_version", "ev_id", "tr_id", "station", "wireid",
     "local_tube_id", "tube_class_id", "x0", "y0", "z0", "dr",
 }
+SEED_HITS = 2
 
 
 def event_hash_int(event_id, seed: int) -> int:
@@ -139,7 +140,9 @@ class SplitShardWriter:
 
         inputs[:input_len] = hits[:-1].astype(np.float32, copy=False)
         targets[:input_len] = tube_ids[1:].astype(np.int16, copy=False)
-        target_mask[:input_len] = True
+        # The first scored prediction is made after two seed hits and targets
+        # the third hit. Position zero (hit 1 -> hit 2) is warm-up only.
+        target_mask[SEED_HITS - 1:input_len] = True
 
         self.inputs.append(inputs)
         self.targets.append(targets)
@@ -383,6 +386,7 @@ def main():
         "num_stations": args.num_stations,
         "tubes_per_station": args.tubes_per_station,
         "num_tubes": args.num_tubes,
+        "seed_hits": SEED_HITS,
         "train_tracks": train_writer.total_tracks,
         "validation_tracks": val_writer.total_tracks,
     }

@@ -227,15 +227,15 @@ class StrawTrackNETModule(pl.LightningModule):
         plane_embedding_dim: int = 8,
         continuous_feature_center=(0.0, 0.0, 120.0, 2.5),
         continuous_feature_scale=(750.0, 750.0, 120.0, 2.5),
-        station_tube_counts=(151, 151, 213, 213, 151, 151, 213, 213),
-        neighbor_smoothing: float = 0.1,
-        neighbor_radius: int = 2,
-        neighbor_sigma: float = 1.0,
+        seed_hits: int = 2,
         hit_density_stats_path: Optional[str] = None,
         hits_normalizer: Optional[MinMaxNormalizeXYZ] = None
     ):
         super().__init__()
+        if seed_hits < 1:
+            raise ValueError("seed_hits must be at least 1.")
         self.save_hyperparameters()
+        self.seed_hits = int(seed_hits)
 
         # Model
         self.model = StrawTrackNET(
@@ -250,12 +250,7 @@ class StrawTrackNETModule(pl.LightningModule):
         )
 
         # Loss
-        self.loss_fn = StrawTrackNetLoss(
-            station_tube_counts=station_tube_counts,
-            neighbor_smoothing=neighbor_smoothing,
-            neighbor_radius=neighbor_radius,
-            neighbor_sigma=neighbor_sigma,
-        )
+        self.loss_fn = StrawTrackNetLoss()
 
         # Metrics
         self.train_hit_efficiency_t1 = StrawHitEfficiencyMetric('t1')
@@ -270,34 +265,35 @@ class StrawTrackNETModule(pl.LightningModule):
     def forward(self, batch):
         return self.model(batch['inputs'], batch['input_lengths'])
 
+    def _supervised_view(self, output, batch):
+        """Drop predictions made before all seed hits have been consumed."""
+        first_step = self.seed_hits - 1
+        if output['tube_logits_t1'].size(1) <= first_step:
+            raise ValueError(
+                f"A sequence needs at least {self.seed_hits + 1} hits to provide "
+                f"a target after {self.seed_hits} seed hits."
+            )
+        supervised_output = {
+            'tube_logits_t1': output['tube_logits_t1'][:, first_step:],
+        }
+        return (
+            supervised_output,
+            batch['targets'][:, first_step:],
+            batch['target_mask'][:, first_step:],
+        )
+
     def training_step(self, batch, batch_idx):
         output = self(batch)
-        loss, loss_components = self.loss_fn(
-            output,
-            batch['targets'],
-            batch['target_mask'],
-            return_components=True,
-        )
+        supervised_output, targets, target_mask = self._supervised_view(output, batch)
+        loss = self.loss_fn(supervised_output, targets, target_mask)
 
         # Update metrics
         self.train_hit_efficiency_t1.update(
-            output, batch['targets'], batch['target_mask'])
+            supervised_output, targets, target_mask)
 
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('train_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
-        self.log(
-            'train_hard_ce',
-            loss_components['hard_ce'],
-            batch_size=batch_size,
-            sync_dist=True,
-        )
-        self.log(
-            'train_neighbor_ce',
-            loss_components['neighbor_ce'],
-            batch_size=batch_size,
-            sync_dist=True,
-        )
         self.log(
             "train_hit_efficiency_t1",
             self.train_hit_efficiency_t1,
@@ -310,33 +306,16 @@ class StrawTrackNETModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         output = self(batch)
-        loss, loss_components = self.loss_fn(
-            output,
-            batch['targets'],
-            batch['target_mask'],
-            return_components=True,
-        )
+        supervised_output, targets, target_mask = self._supervised_view(output, batch)
+        loss = self.loss_fn(supervised_output, targets, target_mask)
 
         # Update metrics
         self.val_hit_efficiency_t1.update(
-            output, batch['targets'], batch['target_mask'])
+            supervised_output, targets, target_mask)
 
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('val_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
-        self.log(
-            'val_hard_ce',
-            loss_components['hard_ce'],
-            prog_bar=True,
-            batch_size=batch_size,
-            sync_dist=True,
-        )
-        self.log(
-            'val_neighbor_ce',
-            loss_components['neighbor_ce'],
-            batch_size=batch_size,
-            sync_dist=True,
-        )
         self.log(
             "val_hit_efficiency_t1",
             self.val_hit_efficiency_t1,
@@ -351,12 +330,12 @@ class StrawTrackNETModule(pl.LightningModule):
             # Convert tensors to CPU numpy arrays for visualization
             self.last_batch = {
                 'inputs': batch['inputs'].detach().cpu().numpy(),
-                'targets': batch['targets'].detach().cpu().numpy(),
+                'targets': targets.detach().cpu().numpy(),
                 'input_lengths': batch['input_lengths'],
-                'target_mask': batch['target_mask'].detach().cpu().numpy()
+                'target_mask': target_mask.detach().cpu().numpy()
             }
             self.last_output = {
-                k: v.detach().cpu().numpy() for k, v in output.items()
+                k: v.detach().cpu().numpy() for k, v in supervised_output.items()
             }
 
         return loss
