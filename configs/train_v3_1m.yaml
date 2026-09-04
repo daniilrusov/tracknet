@@ -9,7 +9,7 @@ experiment:
 
 training:
   seed: 42
-  batch_size: 8000
+  batch_size: 32000
   max_epochs: 1000
   num_workers: 8
   shuffle: true
@@ -17,7 +17,7 @@ training:
   devices: 1
   precision: 16-mixed
   matmul_precision: high
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 1
   gradient_clip_val: 1.0
   early_stopping_patience: 20
   early_stopping_min_delta: 0.0001
