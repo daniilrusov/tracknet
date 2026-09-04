@@ -228,12 +228,33 @@ class StrawTrackNETModule(pl.LightningModule):
         continuous_feature_center=(0.0, 0.0, 120.0, 2.5),
         continuous_feature_scale=(750.0, 750.0, 120.0, 2.5),
         seed_hits: int = 2,
+        ranking_loss_weight: float = 0.0,
+        ranking_margin: float = 0.5,
+        ranking_top_m: int = 1,
+        station_tube_counts: Optional[list[int]] = None,
+        lr_scheduler_factor: float = 0.3,
+        lr_scheduler_patience: int = 2,
+        lr_scheduler_threshold: float = 1e-4,
+        lr_scheduler_threshold_mode: str = "rel",
+        lr_scheduler_min_lr: float = 0.0,
         hit_density_stats_path: Optional[str] = None,
         hits_normalizer: Optional[MinMaxNormalizeXYZ] = None
     ):
         super().__init__()
         if seed_hits < 1:
             raise ValueError("seed_hits must be at least 1.")
+        if not 0 < lr_scheduler_factor < 1:
+            raise ValueError("lr_scheduler_factor must be between zero and one.")
+        if lr_scheduler_patience < 0:
+            raise ValueError("lr_scheduler_patience must be non-negative.")
+        if lr_scheduler_threshold < 0:
+            raise ValueError("lr_scheduler_threshold must be non-negative.")
+        if lr_scheduler_threshold_mode not in {"rel", "abs"}:
+            raise ValueError(
+                "lr_scheduler_threshold_mode must be either 'rel' or 'abs'."
+            )
+        if lr_scheduler_min_lr < 0:
+            raise ValueError("lr_scheduler_min_lr must be non-negative.")
         self.save_hyperparameters()
         self.seed_hits = int(seed_hits)
 
@@ -250,7 +271,12 @@ class StrawTrackNETModule(pl.LightningModule):
         )
 
         # Loss
-        self.loss_fn = StrawTrackNetLoss()
+        self.loss_fn = StrawTrackNetLoss(
+            ranking_loss_weight=ranking_loss_weight,
+            ranking_margin=ranking_margin,
+            ranking_top_m=ranking_top_m,
+            station_tube_counts=station_tube_counts,
+        )
 
         # Metrics
         self.train_hit_efficiency_t1 = StrawHitEfficiencyMetric('t1')
@@ -285,7 +311,10 @@ class StrawTrackNETModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         output = self(batch)
         supervised_output, targets, target_mask = self._supervised_view(output, batch)
-        loss = self.loss_fn(supervised_output, targets, target_mask)
+        loss_parts = self.loss_fn.loss_components(
+            supervised_output, targets, target_mask
+        )
+        loss = loss_parts["loss"]
 
         # Update metrics
         self.train_hit_efficiency_t1.update(
@@ -294,6 +323,30 @@ class StrawTrackNETModule(pl.LightningModule):
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('train_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.log(
+            'train_cross_entropy',
+            loss_parts['cross_entropy'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'train_ranking_loss',
+            loss_parts['ranking_loss'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'train_hard_negative_gap',
+            loss_parts['hard_negative_gap'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'train_top_m_negative_gap',
+            loss_parts['top_m_negative_gap'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
         self.log(
             "train_hit_efficiency_t1",
             self.train_hit_efficiency_t1,
@@ -307,7 +360,10 @@ class StrawTrackNETModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         output = self(batch)
         supervised_output, targets, target_mask = self._supervised_view(output, batch)
-        loss = self.loss_fn(supervised_output, targets, target_mask)
+        loss_parts = self.loss_fn.loss_components(
+            supervised_output, targets, target_mask
+        )
+        loss = loss_parts["loss"]
 
         # Update metrics
         self.val_hit_efficiency_t1.update(
@@ -316,6 +372,30 @@ class StrawTrackNETModule(pl.LightningModule):
         # Log metrics
         batch_size = batch['inputs'].size(0)
         self.log('val_loss', loss, prog_bar=True, batch_size=batch_size, sync_dist=True)
+        self.log(
+            'val_cross_entropy',
+            loss_parts['cross_entropy'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'val_ranking_loss',
+            loss_parts['ranking_loss'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'val_hard_negative_gap',
+            loss_parts['hard_negative_gap'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            'val_top_m_negative_gap',
+            loss_parts['top_m_negative_gap'],
+            batch_size=batch_size,
+            sync_dist=True,
+        )
         self.log(
             "val_hit_efficiency_t1",
             self.val_hit_efficiency_t1,
@@ -348,8 +428,11 @@ class StrawTrackNETModule(pl.LightningModule):
         scheduler = ReduceLROnPlateau(
             optimizer,
             mode='min',
-            factor=0.3,
-            patience=2,
+            factor=float(self.hparams.lr_scheduler_factor),
+            patience=int(self.hparams.lr_scheduler_patience),
+            threshold=float(self.hparams.lr_scheduler_threshold),
+            threshold_mode=str(self.hparams.lr_scheduler_threshold_mode),
+            min_lr=float(self.hparams.lr_scheduler_min_lr),
         )
         return {
             "optimizer": optimizer,

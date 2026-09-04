@@ -103,6 +103,9 @@ def train(cfg: DictConfig, components):
             EarlyStopping(
                 monitor="val_loss",
                 patience=int(early_stopping_patience),
+                min_delta=float(
+                    cfg.training.get("early_stopping_min_delta", 0.0)
+                ),
                 mode="min",
             )
         )

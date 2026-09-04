@@ -160,14 +160,57 @@ class StrawPointInAreaLoss(nn.Module):
 
 
 class StrawTrackNetLoss(nn.Module):
-    """Hard cross-entropy for the single true next-tube class."""
+    """Cross-entropy with an optional same-station top-M ranking margin.
 
-    def forward(
+    The ranking term directly optimizes the ordering that determines top-1:
+    the true tube logit must exceed each of the M strongest incorrect logits
+    from the target station by ``ranking_margin``. The hinge penalties are
+    averaged, so changing M does not multiply the loss scale. Cross-entropy
+    remains the primary objective and continues to train the full 1456-class
+    distribution.
+    """
+
+    def __init__(
+        self,
+        ranking_loss_weight: float = 0.0,
+        ranking_margin: float = 0.5,
+        ranking_top_m: int = 1,
+        station_tube_counts: list[int] | tuple[int, ...] | None = None,
+    ):
+        super().__init__()
+        if ranking_loss_weight < 0:
+            raise ValueError("ranking_loss_weight must be non-negative.")
+        if ranking_margin < 0:
+            raise ValueError("ranking_margin must be non-negative.")
+        if ranking_top_m < 1:
+            raise ValueError("ranking_top_m must be at least one.")
+        if station_tube_counts is not None:
+            station_tube_counts = tuple(int(count) for count in station_tube_counts)
+            if not station_tube_counts or any(count < 2 for count in station_tube_counts):
+                raise ValueError(
+                    "station_tube_counts must contain at least two tubes per station."
+                )
+            if ranking_top_m >= min(station_tube_counts):
+                raise ValueError(
+                    "ranking_top_m must be smaller than every station tube count."
+                )
+        if ranking_loss_weight > 0 and station_tube_counts is None:
+            raise ValueError(
+                "station_tube_counts is required when hard-negative ranking is enabled."
+            )
+
+        self.ranking_loss_weight = float(ranking_loss_weight)
+        self.ranking_margin = float(ranking_margin)
+        self.ranking_top_m = int(ranking_top_m)
+        self.station_tube_counts = station_tube_counts
+
+    def loss_components(
         self,
         preds: StrawTubePrediction,
         targets: torch.Tensor,
         target_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> dict[str, torch.Tensor]:
+        """Return the total loss and its independently loggable components."""
         logits = preds['tube_logits_t1']
         if logits.size(0) != targets.size(0):
             raise ValueError('Shape mismatch! Number of samples in '
@@ -186,7 +229,81 @@ class StrawTrackNetLoss(nn.Module):
         if not bool(target_mask.any()):
             raise ValueError("target_mask does not contain any supervised predictions.")
 
-        return F.cross_entropy(
-            logits[target_mask].float(),
-            targets[target_mask],
+        flat_logits = logits[target_mask].float()
+        flat_targets = targets[target_mask]
+        cross_entropy = F.cross_entropy(flat_logits, flat_targets)
+
+        if self.ranking_loss_weight == 0:
+            zero = cross_entropy.new_zeros(())
+            return {
+                "loss": cross_entropy,
+                "cross_entropy": cross_entropy,
+                "ranking_loss": zero,
+                "hard_negative_gap": zero,
+                "top_m_negative_gap": zero,
+            }
+
+        assert self.station_tube_counts is not None
+        if sum(self.station_tube_counts) != flat_logits.size(1):
+            raise ValueError(
+                "station_tube_counts sum to "
+                f"{sum(self.station_tube_counts)}, but logits contain "
+                f"{flat_logits.size(1)} tube classes."
+            )
+
+        true_logits = flat_logits.gather(1, flat_targets[:, None]).squeeze(1)
+        ranking_loss_sum = flat_logits.new_zeros(())
+        hard_negative_gap_sum = flat_logits.new_zeros(())
+        top_m_negative_gap_sum = flat_logits.new_zeros(())
+        assigned_count = 0
+        start = 0
+        for count in self.station_tube_counts:
+            end = start + count
+            rows = (flat_targets >= start) & (flat_targets < end)
+            if bool(rows.any()):
+                station_logits = flat_logits[rows, start:end].clone()
+                local_targets = flat_targets[rows] - start
+                station_logits.scatter_(1, local_targets[:, None], float("-inf"))
+                top_negative_logits = station_logits.topk(
+                    self.ranking_top_m, dim=1
+                ).values
+                gaps = true_logits[rows, None] - top_negative_logits
+                ranking_loss_sum = ranking_loss_sum + F.relu(
+                    self.ranking_margin - gaps
+                ).sum()
+                hard_negative_gap_sum = hard_negative_gap_sum + gaps[:, 0].sum()
+                top_m_negative_gap_sum = top_m_negative_gap_sum + gaps.sum()
+                assigned_count += int(rows.sum())
+            start = end
+
+        if assigned_count != len(flat_targets):
+            configured_classes = sum(self.station_tube_counts)
+            bad_targets = flat_targets[
+                (flat_targets < 0) | (flat_targets >= configured_classes)
+            ]
+            bad_target = int(bad_targets[0].detach().cpu())
+            raise ValueError(
+                f"Target class {bad_target} is outside configured station ranges."
+            )
+
+        ranking_loss = ranking_loss_sum / (assigned_count * self.ranking_top_m)
+        hard_negative_gap = hard_negative_gap_sum / assigned_count
+        top_m_negative_gap = top_m_negative_gap_sum / (
+            assigned_count * self.ranking_top_m
         )
+        total_loss = cross_entropy + self.ranking_loss_weight * ranking_loss
+        return {
+            "loss": total_loss,
+            "cross_entropy": cross_entropy,
+            "ranking_loss": ranking_loss,
+            "hard_negative_gap": hard_negative_gap,
+            "top_m_negative_gap": top_m_negative_gap,
+        }
+
+    def forward(
+        self,
+        preds: StrawTubePrediction,
+        targets: torch.Tensor,
+        target_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.loss_components(preds, targets, target_mask)["loss"]

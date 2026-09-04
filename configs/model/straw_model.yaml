@@ -12,4 +12,17 @@ continuous_feature_center: [0.0, 0.0, 120.0, 2.5]
 continuous_feature_scale: [750.0, 750.0, 120.0, 2.5]
 # The first prediction included in loss is tube 3 after two seed tubes.
 seed_hits: 2
+# Keep hard cross-entropy, then require the true tube to beat the M strongest
+# incorrect tubes from the same station by this logit margin.
+ranking_loss_weight: 0.25
+ranking_margin: 0.5
+ranking_top_m: 3
+station_tube_counts: ${dataset.station_tube_counts}
+# Ignore tiny validation-loss fluctuations when reducing LR and keep enough
+# learning rate for the ranking objective to continue changing the logits.
+lr_scheduler_factor: 0.3
+lr_scheduler_patience: 5
+lr_scheduler_threshold: 0.0001
+lr_scheduler_threshold_mode: abs
+lr_scheduler_min_lr: 0.000001
 #hits_normalizer: ${transforms.normalizer}
