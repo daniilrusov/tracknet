@@ -11,9 +11,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from .data.schemas import BatchSample
 from .model import StepAheadTrackNET, StrawTrackNET, TrackPrediction, StrawTubePrediction
-from .loss import TrackNetLoss, StrawTrackNetLoss
+from .loss import TrackNetLoss, StrawTrackNetLoss, StrawCoordinateLoss
 from .data.transformations import MinMaxNormalizeXYZ
-from .metrics import SearchAreaMetric, HitEfficiencyMetric, HitDensityMetric, StrawHitEfficiencyMetric
+from .metrics import SearchAreaMetric, HitEfficiencyMetric, HitDensityMetric, StrawHitEfficiencyMetric, StrawCoordinateRMSE
 from .visualization import visualize_track_predictions
 
 
@@ -228,6 +228,11 @@ class StrawTrackNETModule(pl.LightningModule):
         continuous_feature_center=(0.0, 0.0, 120.0, 2.5),
         continuous_feature_scale=(750.0, 750.0, 120.0, 2.5),
         seed_hits: int = 2,
+        predict_coordinates: bool = False,
+        coordinate_center=(0.0, 0.0, 120.0),
+        coordinate_scale=(750.0, 750.0, 120.0),
+        current_coordinate_loss_weight: float = 1.0,
+        next_coordinate_loss_weight: float = 1.0,
         ranking_loss_weight: float = 0.0,
         ranking_margin: float = 0.5,
         ranking_top_m: int = 1,
@@ -243,6 +248,10 @@ class StrawTrackNETModule(pl.LightningModule):
         super().__init__()
         if seed_hits < 1:
             raise ValueError("seed_hits must be at least 1.")
+        coordinate_weights = (current_coordinate_loss_weight, next_coordinate_loss_weight)
+        if not all(torch.isfinite(torch.tensor(weight)) and weight >= 0
+                   for weight in coordinate_weights):
+            raise ValueError("Coordinate loss weights must be finite and non-negative.")
         if not 0 < lr_scheduler_factor < 1:
             raise ValueError("lr_scheduler_factor must be between zero and one.")
         if lr_scheduler_patience < 0:
@@ -268,6 +277,9 @@ class StrawTrackNETModule(pl.LightningModule):
             plane_embedding_dim=plane_embedding_dim,
             continuous_feature_center=continuous_feature_center,
             continuous_feature_scale=continuous_feature_scale,
+            predict_coordinates=predict_coordinates,
+            coordinate_center=coordinate_center,
+            coordinate_scale=coordinate_scale,
         )
 
         # Loss
@@ -282,6 +294,12 @@ class StrawTrackNETModule(pl.LightningModule):
         self.train_hit_efficiency_t1 = StrawHitEfficiencyMetric('t1')
 
         self.val_hit_efficiency_t1 = StrawHitEfficiencyMetric('t1')
+        if predict_coordinates:
+            self.coordinate_loss_fn = StrawCoordinateLoss(coordinate_scale)
+            self.train_coords_current_rmse = StrawCoordinateRMSE()
+            self.train_coords_next_rmse = StrawCoordinateRMSE()
+            self.val_coords_current_rmse = StrawCoordinateRMSE()
+            self.val_coords_next_rmse = StrawCoordinateRMSE()
 
         # Save last output for logging
         # optional is needed to initialize with None
@@ -299,14 +317,32 @@ class StrawTrackNETModule(pl.LightningModule):
                 f"A sequence needs at least {self.seed_hits + 1} hits to provide "
                 f"a target after {self.seed_hits} seed hits."
             )
-        supervised_output = {
-            'tube_logits_t1': output['tube_logits_t1'][:, first_step:],
-        }
+        supervised_output = {key: value[:, first_step:] for key, value in output.items()}
         return (
             supervised_output,
             batch['targets'][:, first_step:],
             batch['target_mask'][:, first_step:],
         )
+
+    def _add_coordinate_loss(self, loss_parts, output, batch, mask, stage):
+        if not self.model.predict_coordinates:
+            return
+        first_step = self.seed_hits - 1
+        for head, target_key, weight in (
+            ('coords_t0', 'coords_current', self.hparams.current_coordinate_loss_weight),
+            ('coords_t1', 'coords_next', self.hparams.next_coordinate_loss_weight),
+        ):
+            if target_key not in batch:
+                raise ValueError(f"Missing {target_key} truth targets. Regenerate the preprocessing cache.")
+            target = batch[target_key][:, first_step:]
+            component = self.coordinate_loss_fn(output[head], target, mask)
+            loss_parts['loss'] = loss_parts['loss'] + weight * component
+            valid_hits = int(mask.sum())
+            self.log(f'{stage}_{target_key}_loss', component, on_step=False, on_epoch=True,
+                     batch_size=valid_hits, sync_dist=True)
+            metric = getattr(self, f'{stage}_{target_key}_rmse')
+            metric.update(output[head], target, mask)
+            self.log(f'{stage}_{target_key}_rmse_mm', metric, on_step=False, on_epoch=True)
 
     def training_step(self, batch, batch_idx):
         output = self(batch)
@@ -314,6 +350,7 @@ class StrawTrackNETModule(pl.LightningModule):
         loss_parts = self.loss_fn.loss_components(
             supervised_output, targets, target_mask
         )
+        self._add_coordinate_loss(loss_parts, supervised_output, batch, target_mask, 'train')
         loss = loss_parts["loss"]
 
         # Update metrics
@@ -363,6 +400,7 @@ class StrawTrackNETModule(pl.LightningModule):
         loss_parts = self.loss_fn.loss_components(
             supervised_output, targets, target_mask
         )
+        self._add_coordinate_loss(loss_parts, supervised_output, batch, target_mask, 'val')
         loss = loss_parts["loss"]
 
         # Update metrics

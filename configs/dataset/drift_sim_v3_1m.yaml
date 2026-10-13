@@ -7,5 +7,6 @@ split_seed: ${training.seed}
 shuffle_shards: true
 shuffle_tracks: true
 schema_version: 3
+require_coordinate_targets: ${model.predict_coordinates}
 input_columns: [x0, y0, z0, dr, station]
 station_tube_counts: [151, 151, 213, 213, 151, 151, 213, 213]

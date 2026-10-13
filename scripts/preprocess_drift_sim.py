@@ -19,6 +19,7 @@ DRIFT_SIM_COLUMNS = [
 V3_REQUIRED_COLUMNS = {
     "schema_version", "ev_id", "tr_id", "station", "wireid",
     "local_tube_id", "tube_class_id", "x0", "y0", "z0", "dr",
+    "x", "y", "z",
 }
 SEED_HITS = 2
 
@@ -131,8 +132,18 @@ class SplitShardWriter:
         self.target_masks = []
         self.input_lengths = []
         self.total_tracks = 0
+        self.coords_current = []
+        self.coords_next = []
+        self.has_coordinates = None
 
-    def add(self, hits: np.ndarray, tube_ids: np.ndarray):
+    def add(self, hits: np.ndarray, tube_ids: np.ndarray, coordinates: np.ndarray | None = None):
+        has_coordinates = coordinates is not None
+        if self.has_coordinates is not None and self.has_coordinates != has_coordinates:
+            raise ValueError("Cannot mix tracks with and without truth coordinates.")
+        self.has_coordinates = has_coordinates
+        if coordinates is not None:
+            if coordinates.shape != (len(hits), 3) or not np.isfinite(coordinates).all():
+                raise ValueError("Truth coordinates must be finite with shape (hits, 3).")
         input_len = len(hits) - 1
         inputs = np.zeros((self.max_len, self.n_features), dtype=np.float32)
         targets = np.zeros((self.max_len,), dtype=np.int16)
@@ -148,6 +159,13 @@ class SplitShardWriter:
         self.targets.append(targets)
         self.target_masks.append(target_mask)
         self.input_lengths.append(input_len)
+        if coordinates is not None:
+            current = np.zeros((self.max_len, 3), dtype=np.float32)
+            future = np.zeros_like(current)
+            current[:input_len] = coordinates[:-1]
+            future[:input_len] = coordinates[1:]
+            self.coords_current.append(current)
+            self.coords_next.append(future)
         self.total_tracks += 1
 
         if len(self.inputs) >= self.shard_size:
@@ -158,21 +176,24 @@ class SplitShardWriter:
             return
 
         shard_path = self.output_dir / f"shard_{self.shard_index:06d}.pt"
-        torch.save(
-            {
+        shard = {
                 "inputs": torch.from_numpy(np.stack(self.inputs)),
                 "targets": torch.from_numpy(np.stack(self.targets)),
                 "target_mask": torch.from_numpy(np.stack(self.target_masks)),
                 "input_lengths": torch.tensor(self.input_lengths, dtype=torch.int16),
-            },
-            shard_path,
-        )
+            }
+        if self.has_coordinates:
+            shard["coords_current"] = torch.from_numpy(np.stack(self.coords_current))
+            shard["coords_next"] = torch.from_numpy(np.stack(self.coords_next))
+        torch.save(shard, shard_path)
 
         self.shard_index += 1
         self.inputs.clear()
         self.targets.clear()
         self.target_masks.clear()
         self.input_lengths.clear()
+        self.coords_current.clear()
+        self.coords_next.clear()
 
 
 def iter_complete_events(file: Path, chunk_size: int, schema_version: str = "legacy"):
@@ -241,7 +262,9 @@ def process_event(event, writer, args):
                 tube_id_offset=args.tube_id_offset,
                 tube_id_mapping=args.tube_id_mapping,
             )
-        writer.add(hits, tube_ids)
+        coordinate_columns = ["x", "y", "z" if "z" in group.columns else "z0"]
+        coordinates = group[coordinate_columns].to_numpy(dtype=np.float32, copy=True)
+        writer.add(hits, tube_ids, coordinates)
 
 
 def parse_args():
@@ -387,6 +410,7 @@ def main():
         "tubes_per_station": args.tubes_per_station,
         "num_tubes": args.num_tubes,
         "seed_hits": SEED_HITS,
+        "coordinate_target_columns": ["x", "y", "z" if args.schema_version == "v3" else "z0"],
         "train_tracks": train_writer.total_tracks,
         "validation_tracks": val_writer.total_tracks,
     }

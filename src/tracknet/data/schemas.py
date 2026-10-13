@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from typing import TypedDict
+from typing import TypedDict, NotRequired
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -109,6 +109,7 @@ class StrawTrack:
     tube_ids: np.ndarray
     hit_ids: np.ndarray
     hits_wp: np.ndarray | None = None
+    hits_truth: np.ndarray | None = None
 
     #@cached_property
     #def momentum_pt(self) -> float:
@@ -129,6 +130,8 @@ class StrawTrack:
         self.hit_ids = self.hit_ids[sort_idx]
         if self.hits_wp is not None:
             self.hits_wp = self.hits_wp[sort_idx]
+        if self.hits_truth is not None:
+            self.hits_truth = self.hits_truth[sort_idx]
 
     def __repr__(self) -> str:
         """Detailed representation showing track properties and hit distribution."""
@@ -155,3 +158,5 @@ class BatchSample(TypedDict):
     input_lengths: list[int]
     targets: torch.Tensor
     target_mask: torch.Tensor
+    coords_current: NotRequired[torch.Tensor]
+    coords_next: NotRequired[torch.Tensor]

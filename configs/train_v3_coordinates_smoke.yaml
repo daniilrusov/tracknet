@@ -1,0 +1,18 @@
+# Short local checks; the full run still uses train_v3_1m.
+defaults:
+  - train_v3_1m
+  - _self_
+
+experiment:
+  name: straw_tracknet_v3_coordinates_smoke
+dataset:
+  cache_dir: ${user_settings.project_path}/outputs/coordinates_smoke/cache
+training:
+  batch_size: 128
+  max_epochs: 3
+  num_workers: 0
+  precision: 32-true
+  log_every_n_steps: 1
+  early_stopping_patience: null
+  limit_train_batches: 12
+  limit_val_batches: 4

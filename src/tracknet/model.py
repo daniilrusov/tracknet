@@ -1,4 +1,4 @@
-from typing import TypedDict
+from typing import TypedDict, NotRequired
 import torch
 import torch.nn as nn
 
@@ -42,6 +42,8 @@ class StrawTubePrediction(TypedDict):
             (batch_size, seq_len, num_tubes).
     """
     tube_logits_t1: torch.Tensor
+    coords_t0: NotRequired[torch.Tensor]
+    coords_t1: NotRequired[torch.Tensor]
 
 
 class StepAheadTrackNET(nn.Module):
@@ -133,13 +135,15 @@ class StepAheadTrackNET(nn.Module):
 
 
 class StrawTrackNET(nn.Module):
-    """GRU encoder with normalized geometry and a per-step tube classifier.
+    """Causal GRU with a next-tube classifier and optional particle xyz heads.
 
     The current straw input schema is ``[x0, y0, z0, dr, station]``. Continuous
     detector coordinates are normalized to roughly ``[-1, 1]`` and the station
     number is used only to select a learned X/Y/U/V plane embedding. The legacy
     six-feature path is retained for loading checkpoints created before this
-    representation was introduced.
+    representation was introduced. Coordinate outputs are in detector units:
+    ``coords_t0`` describes the last input hit and ``coords_t1`` the next hit
+    whose tube is classified by ``tube_logits_t1`` at the same step.
     """
 
     def __init__(self,
@@ -151,7 +155,10 @@ class StrawTrackNET(nn.Module):
                  use_plane_embedding: bool = True,
                  plane_embedding_dim: int = 8,
                  continuous_feature_center=(0.0, 0.0, 120.0, 2.5),
-                 continuous_feature_scale=(750.0, 750.0, 120.0, 2.5)):
+                 continuous_feature_scale=(750.0, 750.0, 120.0, 2.5),
+                 predict_coordinates: bool = False,
+                 coordinate_center=(0.0, 0.0, 120.0),
+                 coordinate_scale=(750.0, 750.0, 120.0)):
         super().__init__()
         if num_tubes is None:
             num_tubes = output_features if output_features is not None else 8000
@@ -167,6 +174,19 @@ class StrawTrackNET(nn.Module):
         self.num_tubes = num_tubes
         self.use_plane_embedding = bool(use_plane_embedding)
         self.plane_embedding_dim = int(plane_embedding_dim)
+        self.predict_coordinates = bool(predict_coordinates)
+        if self.predict_coordinates:
+            center = torch.as_tensor(coordinate_center, dtype=torch.float32)
+            scale = torch.as_tensor(coordinate_scale, dtype=torch.float32)
+            if center.shape != (3,) or scale.shape != (3,):
+                raise ValueError("Coordinate center and scale must contain x, y, z values.")
+            if (not torch.isfinite(center).all()
+                    or not torch.isfinite(scale).all() or torch.any(scale <= 0)):
+                raise ValueError("Coordinate center must be finite and scales finite and positive.")
+            self.register_buffer("coordinate_center", center)
+            self.register_buffer("coordinate_scale", scale)
+            self.coords_current = nn.Linear(hidden_features, 3)
+            self.coords_next = nn.Linear(hidden_features, 3)
 
         rnn_input_features = input_features
         if self.use_plane_embedding:
@@ -235,6 +255,7 @@ class StrawTrackNET(nn.Module):
         Returns:
             StrawTubePrediction: A dictionary containing:
             - 'tube_logits_t1' (torch.Tensor): next-tube logits for every input step
+            - 'coords_t0', 'coords_t1': optional current/next particle xyz
         """
         x = self.encode_inputs(inputs)
         packed = torch.nn.utils.rnn.pack_padded_sequence(
@@ -242,6 +263,16 @@ class StrawTrackNET(nn.Module):
         x, _ = self.rnn(packed)
         x, _ = torch.nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
 
-        return StrawTubePrediction(
-            tube_logits_t1=self.tube_classifier(x)
-        )
+        return self.predict_from_hidden(x)
+
+    def predict_from_hidden(self, hidden: torch.Tensor) -> StrawTubePrediction:
+        """Predict tube t+1 and particle positions at t and t+1 in detector units.
+
+        Both coordinate heads use only the causal prefix ending at t. Truth
+        coordinates and the future tube's geometry are never model inputs.
+        """
+        output = StrawTubePrediction(tube_logits_t1=self.tube_classifier(hidden))
+        if self.predict_coordinates:
+            output['coords_t0'] = self.coords_current(hidden) * self.coordinate_scale + self.coordinate_center
+            output['coords_t1'] = self.coords_next(hidden) * self.coordinate_scale + self.coordinate_center
+        return output

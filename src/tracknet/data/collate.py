@@ -104,14 +104,23 @@ def collate_fn(batch: list[Track]) -> BatchSample:
     target_mask = torch.zeros(batch_size, max_len, dtype=torch.bool)
     input_lengths = []
 
+    coordinate_targets = {}
+    if all(getattr(track, 'hits_truth', None) is not None for track in batch):
+        coordinate_targets = {
+            key: torch.zeros(batch_size, max_len, 3, dtype=torch.float32)
+            for key in ('coords_current', 'coords_next')
+        }
     # 3) Fill the tensors
     for i, track in enumerate(batch):
-        hits = track.hits_xyz  # shape (N, 6)
+        hits = track.hits_xyz
         tube_ids = track.tube_ids
         n = len(hits) - 1      # number of training steps for this track
         # input: hits[:-1], target: hits[1:]
         inputs[i, :n, :] = torch.tensor(hits[:-1], dtype=torch.float32)
         targets[i, :n] = torch.tensor(tube_ids[1:], dtype=torch.long)
+        if coordinate_targets:
+            coordinate_targets['coords_current'][i, :n] = torch.as_tensor(track.hits_truth[:-1], dtype=torch.float32)
+            coordinate_targets['coords_next'][i, :n] = torch.as_tensor(track.hits_truth[1:], dtype=torch.float32)
         # Position zero predicts tube 2 from tube 1 and is warm-up only.
         # Supervision starts at position one: tubes 1+2 -> tube 3.
         target_mask[i, 1:n] = True
@@ -122,5 +131,6 @@ def collate_fn(batch: list[Track]) -> BatchSample:
         inputs=inputs,
         input_lengths=input_lengths,
         targets=targets,
-        target_mask=target_mask
+        target_mask=target_mask,
+        **coordinate_targets,
     )

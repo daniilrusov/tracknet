@@ -118,6 +118,11 @@ with two seed tubes is scored starting with the third tube.
 
 ## Results and Outputs
 
+StrawTrackNET also supports two auxiliary particle-coordinate heads: current
+hit xyz and next-hit xyz alongside next-tube classification. See
+[`docs/straw_coordinate_heads.md`](docs/straw_coordinate_heads.md) for target
+alignment, losses, local smoke checks, and cache/checkpoint compatibility.
+
 Training results are stored in `outputs/` with the following structure:
 
 ```text

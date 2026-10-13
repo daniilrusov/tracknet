@@ -364,6 +364,8 @@ class StrawTracksDataset(Dataset):
                 hits_xyz=group[self.input_columns].values,
                 tube_ids=tube_ids,
                 hit_ids=hit_ids,
+                hits_truth=(group[['x', 'y', 'z' if 'z' in group.columns else 'z0']].to_numpy(dtype=np.float32)
+                            if {'x', 'y', 'z0'}.issubset(group.columns) else None),
                 hits_wp=(
                     group[['wpx', 'wpy', 'wpz']].values
                     if {'wpx', 'wpy', 'wpz'}.issubset(group.columns)
@@ -526,6 +528,8 @@ class StreamingStrawTracksDataset(IterableDataset):
                 hits_xyz=group[self.input_columns].values,
                 tube_ids=self._tube_class_ids(group),
                 hit_ids=group["hit_id"].values,
+                hits_truth=(group[['x', 'y', 'z' if 'z' in group.columns else 'z0']].to_numpy(dtype=np.float32)
+                            if {'x', 'y', 'z0'}.issubset(group.columns) else None),
                 hits_wp=(
                     group[["wpx", "wpy", "wpz"]].values
                     if {"wpx", "wpy", "wpz"}.issubset(group.columns)
@@ -614,6 +618,7 @@ class PrebatchedStrawTracksDataset(IterableDataset):
         schema_version: str | int | None = None,
         input_columns: Optional[list[str]] = None,
         station_tube_counts: Optional[list[int]] = None,
+        require_coordinate_targets: bool = False,
         **_,
     ):
         if split not in ("train", "validation"):
@@ -622,6 +627,7 @@ class PrebatchedStrawTracksDataset(IterableDataset):
             )
 
         self.cache_dir = Path(cache_dir)
+        self.require_coordinate_targets = bool(require_coordinate_targets)
         self.split = split
         self.batch_size = int(batch_size)
         self.num_tubes = int(num_tubes)
@@ -651,6 +657,8 @@ class PrebatchedStrawTracksDataset(IterableDataset):
             )
         if metadata_path.exists():
             metadata = torch.load(metadata_path, map_location="cpu")
+            if self.require_coordinate_targets and metadata.get("coordinate_target_columns") not in (["x", "y", "z"], ["x", "y", "z0"]):
+                raise ValueError("Truth coordinate targets are missing. Regenerate the cache with scripts/preprocess_drift_sim.py.")
             metadata_num_tubes = metadata.get("num_tubes")
             if metadata_num_tubes is not None and int(metadata_num_tubes) != self.num_tubes:
                 raise ValueError(
@@ -730,6 +738,12 @@ class PrebatchedStrawTracksDataset(IterableDataset):
             targets = shard["targets"].long()
             target_mask = shard["target_mask"].bool()
             input_lengths = shard["input_lengths"].long()
+            coordinate_targets = {}
+            for key in ("coords_current", "coords_next"):
+                if key in shard:
+                    coordinate_targets[key] = shard[key].float()
+                elif self.require_coordinate_targets:
+                    raise ValueError(f"Shard {shard_file} lacks {key}. Regenerate the cache.")
             n_tracks = inputs.size(0)
             order = None
             if self.shuffle_tracks:
@@ -750,4 +764,5 @@ class PrebatchedStrawTracksDataset(IterableDataset):
                     "targets": targets[selection],
                     "target_mask": target_mask[selection],
                     "input_lengths": input_lengths[selection].tolist(),
+                    **{key: value[selection] for key, value in coordinate_targets.items()},
                 }

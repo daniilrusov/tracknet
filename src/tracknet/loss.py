@@ -4,6 +4,28 @@ import torch.nn.functional as F
 from .model import TrackPrediction, PointPrediction, StrawTubePrediction
 
 
+class StrawCoordinateLoss(nn.Module):
+    """Masked MSE for current and next particle xyz, normalized per axis."""
+
+    def __init__(self, coordinate_scale=(750.0, 750.0, 120.0)):
+        super().__init__()
+        scale = torch.as_tensor(coordinate_scale, dtype=torch.float32)
+        if scale.shape != (3,) or not torch.isfinite(scale).all() or torch.any(scale <= 0):
+            raise ValueError("Coordinate scales must contain three finite positive values.")
+        self.register_buffer("coordinate_scale", scale)
+
+    def forward(self, prediction, target, mask):
+        if prediction.shape != (*mask.shape, 3) or target.shape != prediction.shape:
+            raise ValueError("Coordinate predictions and targets must have shape (batch, steps, 3).")
+        if not mask.any():
+            raise ValueError("No supervised coordinate predictions.")
+        valid_target = target[mask].float()
+        if not torch.isfinite(valid_target).all():
+            raise ValueError("Supervised truth coordinates must be finite.")
+        error = (prediction[mask].float() - valid_target) / self.coordinate_scale
+        return error.square().mean()
+
+
 class PointInAreaLoss(nn.Module):
     """
     Computes the normalized distance between predicted and true hit positions.

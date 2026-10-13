@@ -66,6 +66,34 @@ class TrackRecord:
     targets: np.ndarray
     source_stations: np.ndarray
     target_stations: np.ndarray
+    coords_current: np.ndarray | None = None
+    coords_next: np.ndarray | None = None
+
+
+@dataclass
+class CoordinateStats:
+    support: int = 0
+    squared_error: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
+    absolute_error: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float64))
+    distance_sum: float = 0.0
+
+    def update(self, prediction, target):
+        error = np.asarray(prediction, dtype=np.float64) - target
+        if not np.isfinite(error).all():
+            raise ValueError("Non-finite coordinate predictions or targets during evaluation.")
+        self.support += len(error)
+        self.squared_error += np.square(error).sum(axis=0)
+        self.absolute_error += np.abs(error).sum(axis=0)
+        self.distance_sum += float(np.linalg.norm(error, axis=-1).sum())
+
+    def as_dict(self):
+        return {
+            "support": self.support,
+            "rmse_distance_mm": float(np.sqrt(self.squared_error.sum() / self.support)),
+            "mean_distance_mm": self.distance_sum / self.support,
+            "rmse_xyz_mm": np.sqrt(self.squared_error / self.support).tolist(),
+            "mae_xyz_mm": (self.absolute_error / self.support).tolist(),
+        }
 
 
 @dataclass(frozen=True)
@@ -313,6 +341,7 @@ def iter_tracks(
     max_hits: int,
     schema: DatasetSchema,
     input_columns: list[str],
+    include_coordinates: bool = False,
 ) -> Iterator[TrackRecord]:
     for _, event in iter_complete_events(path, chunk_size, schema.version):
         for _, group in event.groupby("tr_id", sort=False):
@@ -322,11 +351,16 @@ def iter_tracks(
             hits = group[input_columns].to_numpy(dtype=np.float32, copy=True)
             stations = group["station"].to_numpy(dtype=np.int64, copy=True)
             tube_ids = tube_class_ids(group, schema)
+            coordinates = None
+            if include_coordinates:
+                coordinates = group[["x", "y", "z" if "z" in group.columns else "z0"]].to_numpy(dtype=np.float32, copy=True)
             yield TrackRecord(
                 inputs=hits[:-1],
                 targets=tube_ids[1:],
                 source_stations=stations[:-1],
                 target_stations=stations[1:],
+                coords_current=coordinates[:-1] if coordinates is not None else None,
+                coords_next=coordinates[1:] if coordinates is not None else None,
             )
 
 
@@ -381,6 +415,9 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[StrawTrackN
         continuous_feature_scale=hparams.get(
             "continuous_feature_scale", (750.0, 750.0, 120.0, 2.5)
         ),
+        predict_coordinates=bool(hparams.get("predict_coordinates", False)),
+        coordinate_center=hparams.get("coordinate_center", (0.0, 0.0, 120.0)),
+        coordinate_scale=hparams.get("coordinate_scale", (750.0, 750.0, 120.0)),
     )
     model_state = {
         key.removeprefix("model."): value
@@ -524,6 +561,7 @@ def evaluate(args: argparse.Namespace) -> dict:
     track_top1_recall_sum = 0.0
     track_exact = {k: 0 for k in TOP_K}
     station_correct = 0
+    coordinate_stats = {name: CoordinateStats() for name in ("current", "next")}
 
     records = iter_tracks(
         args.data,
@@ -532,6 +570,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         args.max_hits,
         schema,
         input_columns,
+        include_coordinates=model.predict_coordinates,
     )
     progress = tqdm(batched(records, args.batch_size), desc="Evaluating", unit="batch")
     for batch_records in progress:
@@ -549,7 +588,14 @@ def evaluate(args: argparse.Namespace) -> dict:
         # the fixed seven-step tensor gives identical valid-step outputs and avoids
         # pack/unpack overhead during this large, inference-only pass.
         recurrent_output, _ = model.rnn(model.encode_inputs(inputs.to(device)))
-        logits = model.tube_classifier(recurrent_output)
+        predictions = model.predict_from_hidden(recurrent_output)
+        logits = predictions['tube_logits_t1']
+        if model.predict_coordinates:
+            for name, head in (("current", "coords_t0"), ("next", "coords_t1")):
+                truth = np.zeros((*mask.shape, 3), dtype=np.float32)
+                for index, record in enumerate(batch_records):
+                    truth[index, :len(record.targets)] = getattr(record, f"coords_{name}")
+                coordinate_stats[name].update(predictions[head][torch.from_numpy(mask).to(device)].cpu().numpy(), truth[mask])
         targets_device = torch.from_numpy(targets).to(device)
         mask_device = torch.from_numpy(mask).to(device)
 
@@ -702,6 +748,8 @@ def evaluate(args: argparse.Namespace) -> dict:
                 for key, value in station_masked_overall.as_dict().items()
             },
             **macro_topk,
+            **({"coordinates": {name: stats.as_dict() for name, stats in coordinate_stats.items()}}
+               if model.predict_coordinates else {}),
         },
         "by_group": grouped_rows,
     }

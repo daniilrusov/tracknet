@@ -318,6 +318,23 @@ class HitDensityMetric(Metric):
         return torch.tensor(0.0)
 
 
+class StrawCoordinateRMSE(Metric):
+    """RMS Euclidean particle-position error in detector units (mm)."""
+
+    def __init__(self):
+        super().__init__()
+        self.add_state("squared_error", default=torch.tensor(0.0, dtype=torch.float64), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, prediction, target, mask):
+        error = prediction[mask].double() - target[mask].double()
+        self.squared_error += error.square().sum()
+        self.count += error.size(0)
+
+    def compute(self):
+        return (self.squared_error / self.count.clamp_min(1)).sqrt().float()
+
+
 class StrawHitEfficiencyMetric(Metric):
     """Accuracy of next straw tube classification."""
 
