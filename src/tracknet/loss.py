@@ -4,6 +4,36 @@ import torch.nn.functional as F
 from .model import TrackPrediction, PointPrediction, StrawTubePrediction
 
 
+class StrawTubeLocalLoss(nn.Module):
+    """Along-wire MSE and binary LR cross entropy on supervised hits only."""
+
+    def __init__(self, along_scale=750.0, lr_weight=1.0):
+        super().__init__()
+        if not torch.isfinite(torch.tensor(along_scale)) or along_scale <= 0:
+            raise ValueError("along_scale must be finite and positive.")
+        if not torch.isfinite(torch.tensor(lr_weight)) or lr_weight < 0:
+            raise ValueError("lr_weight must be finite and non-negative.")
+        self.along_scale = float(along_scale)
+        self.lr_weight = float(lr_weight)
+
+    def forward(self, along, lr_logits, target_along, target_lr, mask):
+        shape = (*mask.shape, 1)
+        if any(value.shape != shape for value in (along, lr_logits, target_along, target_lr)):
+            raise ValueError("Local predictions and targets must have shape (batch, steps, 1).")
+        if not mask.any():
+            raise ValueError("No supervised tube-local predictions.")
+        values = [value[mask].float() for value in (along, lr_logits, target_along, target_lr)]
+        if not all(torch.isfinite(value).all() for value in values):
+            raise ValueError("Supervised tube-local predictions and targets must be finite.")
+        along_valid, logits_valid, along_truth, lr_truth = values
+        if torch.any((lr_truth != 0) & (lr_truth != 1)):
+            raise ValueError("LR targets must be binary, with 1 on the positive normal side.")
+        along_loss = ((along_valid - along_truth) / self.along_scale).square().mean()
+        lr_loss = F.binary_cross_entropy_with_logits(logits_valid, lr_truth)
+        return {"loss": along_loss + self.lr_weight * lr_loss,
+                "along_loss": along_loss, "lr_loss": lr_loss}
+
+
 class StrawCoordinateLoss(nn.Module):
     """Masked MSE for current and next particle xyz, normalized per axis."""
 

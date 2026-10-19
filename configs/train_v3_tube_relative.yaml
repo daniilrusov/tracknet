@@ -1,0 +1,10 @@
+defaults:
+  - train_v3_1m
+  - _self_
+
+experiment:
+  name: straw_tracknet_v3_1m_tube_relative
+dataset:
+  cache_dir: ${user_settings.project_path}/outputs/drift_sim_v3_1m_coordinates_cache
+model:
+  coordinate_representation: tube_relative

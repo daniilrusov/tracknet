@@ -118,8 +118,10 @@ with two seed tubes is scored starting with the third tube.
 
 ## Results and Outputs
 
-StrawTrackNET also supports two auxiliary particle-coordinate heads: current
-hit xyz and next-hit xyz alongside next-tube classification. See
+StrawTrackNET supports two auxiliary position heads for the current and next
+hit alongside next-tube classification. The default V3 representation predicts
+one along-wire coordinate in mm and a left/right logit per hit. Legacy xyz
+checkpoints remain supported. See
 [`docs/straw_coordinate_heads.md`](docs/straw_coordinate_heads.md) for target
 alignment, losses, local smoke checks, and cache/checkpoint compatibility.
 

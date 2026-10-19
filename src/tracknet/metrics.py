@@ -335,6 +335,22 @@ class StrawCoordinateRMSE(Metric):
         return (self.squared_error / self.count.clamp_min(1)).sqrt().float()
 
 
+class StrawLRAccuracy(Metric):
+    """Hit-weighted binary LR accuracy (logit >= 0 means lr=+1)."""
+
+    def __init__(self):
+        super().__init__()
+        self.add_state("correct", default=torch.tensor(0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, logits, target, mask):
+        self.correct += ((logits[mask] >= 0) == target[mask].bool()).sum()
+        self.count += int(mask.sum())
+
+    def compute(self):
+        return self.correct.float() / self.count.clamp_min(1)
+
+
 class StrawHitEfficiencyMetric(Metric):
     """Accuracy of next straw tube classification."""
 

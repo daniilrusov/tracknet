@@ -1,0 +1,8 @@
+defaults:
+  - train_v3_coordinates_smoke
+  - _self_
+
+experiment:
+  name: straw_tracknet_v3_tube_relative_smoke
+model:
+  coordinate_representation: tube_relative

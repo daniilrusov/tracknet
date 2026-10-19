@@ -89,6 +89,9 @@ def test_evaluator_loads_both_checkpoint_architectures(tmp_path, predict_coordin
     module = StrawTrackNETModule(hidden_features=4, num_tubes=12, predict_coordinates=predict_coordinates)
     path = tmp_path / 'model.ckpt'
     hparams = dict(module.hparams)
+    # Actual older checkpoints predate all tube-relative constructor options.
+    for key in ('coordinate_representation', 'along_coordinate_scale', 'lr_loss_weight'):
+        hparams.pop(key)
     if not predict_coordinates:
         for key in ('predict_coordinates', 'coordinate_center', 'coordinate_scale'):
             hparams.pop(key)

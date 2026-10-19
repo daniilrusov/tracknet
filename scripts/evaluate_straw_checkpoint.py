@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.tracknet.model import StrawTrackNET
+from src.tracknet.straw_geometry import tube_local_targets, reconstruct_tube_position
 
 
 DRIFT_SIM_COLUMNS = [
@@ -68,6 +69,7 @@ class TrackRecord:
     target_stations: np.ndarray
     coords_current: np.ndarray | None = None
     coords_next: np.ndarray | None = None
+    measurements_next: np.ndarray | None = None
 
 
 @dataclass
@@ -93,6 +95,46 @@ class CoordinateStats:
             "mean_distance_mm": self.distance_sum / self.support,
             "rmse_xyz_mm": np.sqrt(self.squared_error / self.support).tolist(),
             "mae_xyz_mm": (self.absolute_error / self.support).tolist(),
+        }
+
+
+@dataclass
+class TubeLocalStats:
+    support: int = 0
+    along_squared_error: float = 0.
+    along_absolute_error: float = 0.
+    lr_correct: int = 0
+    lr_bce_sum: float = 0.
+    hard_xyz: CoordinateStats = field(default_factory=CoordinateStats)
+    soft_xyz: CoordinateStats = field(default_factory=CoordinateStats)
+
+    def update(self, along, lr_logits, truth, measurement):
+        if len(truth) == 0:
+            return
+        target_along, target_lr, _ = tube_local_targets(truth, measurement[..., :3], measurement[..., 4])
+        if not all(torch.isfinite(value).all() for value in (along, lr_logits, truth)):
+            raise ValueError("Non-finite tube-local predictions or truth during evaluation.")
+        error = along.double() - target_along.double()
+        self.support += len(truth)
+        self.along_squared_error += float(error.square().sum())
+        self.along_absolute_error += float(error.abs().sum())
+        self.lr_correct += int(((lr_logits >= 0) == target_lr.bool()).sum())
+        self.lr_bce_sum += float(F.binary_cross_entropy_with_logits(lr_logits.float(), target_lr, reduction='sum'))
+        for soft, stats in ((False, self.hard_xyz), (True, self.soft_xyz)):
+            xyz = reconstruct_tube_position(along, lr_logits, measurement, soft=soft)
+            stats.update(xyz.cpu().numpy(), truth.cpu().numpy())
+
+    def as_dict(self):
+        if not self.support:
+            return {"support": 0}
+        return {
+            "support": self.support,
+            "along_rmse_mm": math.sqrt(self.along_squared_error / self.support),
+            "along_mae_mm": self.along_absolute_error / self.support,
+            "lr_accuracy": self.lr_correct / self.support,
+            "lr_binary_cross_entropy": self.lr_bce_sum / self.support,
+            "xyz_hard_given_measurement": self.hard_xyz.as_dict(),
+            "xyz_soft_given_measurement": self.soft_xyz.as_dict(),
         }
 
 
@@ -361,6 +403,8 @@ def iter_tracks(
                 target_stations=stations[1:],
                 coords_current=coordinates[:-1] if coordinates is not None else None,
                 coords_next=coordinates[1:] if coordinates is not None else None,
+                measurements_next=group[GEOMETRY_INPUT_COLUMNS].to_numpy(dtype=np.float32)[1:]
+                if include_coordinates else None,
             )
 
 
@@ -418,6 +462,8 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[StrawTrackN
         predict_coordinates=bool(hparams.get("predict_coordinates", False)),
         coordinate_center=hparams.get("coordinate_center", (0.0, 0.0, 120.0)),
         coordinate_scale=hparams.get("coordinate_scale", (750.0, 750.0, 120.0)),
+        coordinate_representation=hparams.get("coordinate_representation", "cartesian"),
+        along_coordinate_scale=float(hparams.get("along_coordinate_scale", 750.0)),
     )
     model_state = {
         key.removeprefix("model."): value
@@ -537,6 +583,9 @@ def evaluate(args: argparse.Namespace) -> dict:
             f"Checkpoint has {model.num_tubes} output classes, but the "
             f"{schema.version} dataset defines {schema.num_tubes}."
         )
+    relative = model.predict_coordinates and model.coordinate_representation == 'tube_relative'
+    if relative and schema.version != 'v3':
+        raise ValueError("Tube-relative heads require DriftSim V3 evaluation data.")
     max_len = args.max_hits - 1
     warmup_steps = seed_hits - 1
     if max_len <= warmup_steps:
@@ -562,6 +611,8 @@ def evaluate(args: argparse.Namespace) -> dict:
     track_exact = {k: 0 for k in TOP_K}
     station_correct = 0
     coordinate_stats = {name: CoordinateStats() for name in ("current", "next")}
+    relative_stats = {name: TubeLocalStats() for name in ('current', 'next_relative_to_true_tube', 'next_when_tube_correct')}
+    relative_station_stats = defaultdict(TubeLocalStats)
 
     records = iter_tracks(
         args.data,
@@ -590,12 +641,31 @@ def evaluate(args: argparse.Namespace) -> dict:
         recurrent_output, _ = model.rnn(model.encode_inputs(inputs.to(device)))
         predictions = model.predict_from_hidden(recurrent_output)
         logits = predictions['tube_logits_t1']
-        if model.predict_coordinates:
+        if model.predict_coordinates and not relative:
             for name, head in (("current", "coords_t0"), ("next", "coords_t1")):
                 truth = np.zeros((*mask.shape, 3), dtype=np.float32)
                 for index, record in enumerate(batch_records):
                     truth[index, :len(record.targets)] = getattr(record, f"coords_{name}")
                 coordinate_stats[name].update(predictions[head][torch.from_numpy(mask).to(device)].cpu().numpy(), truth[mask])
+        elif relative:
+            valid_mask = torch.from_numpy(mask).to(device)
+            tube_correct = logits[valid_mask].argmax(-1) == torch.from_numpy(targets[mask]).to(device)
+            for name, step, label in (('current', 't0', 'current'), ('next', 't1', 'next_relative_to_true_tube')):
+                truth = np.zeros((*mask.shape, 3), dtype=np.float32)
+                measurements = np.zeros((*mask.shape, 5), dtype=np.float32)
+                for index, record in enumerate(batch_records):
+                    truth[index, :len(record.targets)] = getattr(record, f'coords_{name}')
+                    measurements[index, :len(record.targets)] = record.inputs if name == 'current' else record.measurements_next
+                actual = torch.from_numpy(truth[mask]).to(device)
+                measured = torch.from_numpy(measurements[mask]).to(device)
+                along = predictions[f'along_{step}'][valid_mask]
+                lr_logits = predictions[f'lr_logits_{step}'][valid_mask]
+                relative_stats[label].update(along, lr_logits, actual, measured)
+                for station in measured[..., 4].unique():
+                    selected = measured[..., 4] == station
+                    relative_station_stats[(label, int(station))].update(along[selected], lr_logits[selected], actual[selected], measured[selected])
+                if name == 'next':
+                    relative_stats['next_when_tube_correct'].update(along[tube_correct], lr_logits[tube_correct], actual[tube_correct], measured[tube_correct])
         targets_device = torch.from_numpy(targets).to(device)
         mask_device = torch.from_numpy(mask).to(device)
 
@@ -749,7 +819,13 @@ def evaluate(args: argparse.Namespace) -> dict:
             },
             **macro_topk,
             **({"coordinates": {name: stats.as_dict() for name, stats in coordinate_stats.items()}}
-               if model.predict_coordinates else {}),
+               if model.predict_coordinates and not relative else {}),
+            **({"tube_relative": {
+                "interpretation": "Along/LR targets are relative to the true hit tube. Next XYZ uses its observed dr only in evaluation, never as a network input; it is conditional reconstruction, not unconditional future XYZ prediction.",
+                **{name: stats.as_dict() for name, stats in relative_stats.items()},
+                "by_station": [{"head": name, "station": station, **stats.as_dict()}
+                               for (name, station), stats in sorted(relative_station_stats.items())],
+            }} if relative else {}),
         },
         "by_group": grouped_rows,
     }

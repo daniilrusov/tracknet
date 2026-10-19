@@ -11,9 +11,10 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from .data.schemas import BatchSample
 from .model import StepAheadTrackNET, StrawTrackNET, TrackPrediction, StrawTubePrediction
-from .loss import TrackNetLoss, StrawTrackNetLoss, StrawCoordinateLoss
+from .loss import TrackNetLoss, StrawTrackNetLoss, StrawCoordinateLoss, StrawTubeLocalLoss
+from .straw_geometry import tube_local_targets, V3_TUBE_COUNTS
 from .data.transformations import MinMaxNormalizeXYZ
-from .metrics import SearchAreaMetric, HitEfficiencyMetric, HitDensityMetric, StrawHitEfficiencyMetric, StrawCoordinateRMSE
+from .metrics import SearchAreaMetric, HitEfficiencyMetric, HitDensityMetric, StrawHitEfficiencyMetric, StrawCoordinateRMSE, StrawLRAccuracy
 from .visualization import visualize_track_predictions
 
 
@@ -231,6 +232,9 @@ class StrawTrackNETModule(pl.LightningModule):
         predict_coordinates: bool = False,
         coordinate_center=(0.0, 0.0, 120.0),
         coordinate_scale=(750.0, 750.0, 120.0),
+        coordinate_representation: str = "cartesian",
+        along_coordinate_scale: float = 750.0,
+        lr_loss_weight: float = 1.0,
         current_coordinate_loss_weight: float = 1.0,
         next_coordinate_loss_weight: float = 1.0,
         ranking_loss_weight: float = 0.0,
@@ -280,7 +284,12 @@ class StrawTrackNETModule(pl.LightningModule):
             predict_coordinates=predict_coordinates,
             coordinate_center=coordinate_center,
             coordinate_scale=coordinate_scale,
+            coordinate_representation=coordinate_representation,
+            along_coordinate_scale=along_coordinate_scale,
         )
+        if predict_coordinates and coordinate_representation == "tube_relative":
+            if station_tube_counts is not None and tuple(station_tube_counts) != V3_TUBE_COUNTS:
+                raise ValueError("Tube-relative heads require the fixed DriftSim V3 station tube counts.")
 
         # Loss
         self.loss_fn = StrawTrackNetLoss(
@@ -294,7 +303,13 @@ class StrawTrackNETModule(pl.LightningModule):
         self.train_hit_efficiency_t1 = StrawHitEfficiencyMetric('t1')
 
         self.val_hit_efficiency_t1 = StrawHitEfficiencyMetric('t1')
-        if predict_coordinates:
+        if predict_coordinates and coordinate_representation == "tube_relative":
+            self.coordinate_loss_fn = StrawTubeLocalLoss(along_coordinate_scale, lr_loss_weight)
+            for stage in ('train', 'val'):
+                for name in ('current', 'next'):
+                    setattr(self, f'{stage}_{name}_along_rmse', StrawCoordinateRMSE())
+                    setattr(self, f'{stage}_{name}_lr_accuracy', StrawLRAccuracy())
+        elif predict_coordinates:
             self.coordinate_loss_fn = StrawCoordinateLoss(coordinate_scale)
             self.train_coords_current_rmse = StrawCoordinateRMSE()
             self.train_coords_next_rmse = StrawCoordinateRMSE()
@@ -327,6 +342,8 @@ class StrawTrackNETModule(pl.LightningModule):
     def _add_coordinate_loss(self, loss_parts, output, batch, mask, stage):
         if not self.model.predict_coordinates:
             return
+        if self.model.coordinate_representation == 'tube_relative':
+            return self._add_tube_local_loss(loss_parts, output, batch, mask, stage)
         first_step = self.seed_hits - 1
         for head, target_key, weight in (
             ('coords_t0', 'coords_current', self.hparams.current_coordinate_loss_weight),
@@ -343,6 +360,39 @@ class StrawTrackNETModule(pl.LightningModule):
             metric = getattr(self, f'{stage}_{target_key}_rmse')
             metric.update(output[head], target, mask)
             self.log(f'{stage}_{target_key}_rmse_mm', metric, on_step=False, on_epoch=True)
+
+    def _add_tube_local_loss(self, loss_parts, output, batch, mask, stage):
+        first_step = self.seed_hits - 1
+        for name, step, weight in (
+            ('current', 't0', self.hparams.current_coordinate_loss_weight),
+            ('next', 't1', self.hparams.next_coordinate_loss_weight),
+        ):
+            if f'coords_{name}' not in batch:
+                raise ValueError(f"Missing coords_{name} truth targets. Regenerate the preprocessing cache.")
+            # Mask before projection: padding may have station=0 and NaN truth.
+            truth = batch[f'coords_{name}'][:, first_step:][mask]
+            if not torch.isfinite(truth).all():
+                raise ValueError("Supervised truth coordinates must be finite.")
+            if name == 'current':
+                measurement = batch['inputs'][:, first_step:][mask]
+            else:
+                measurement = self.model.tube_geometry.for_classes(batch['targets'][:, first_step:][mask])
+            target_along = torch.zeros_like(output[f'along_{step}'], dtype=torch.float32)
+            target_lr = torch.zeros_like(output[f'lr_logits_{step}'], dtype=torch.float32)
+            along, lr, _ = tube_local_targets(truth, measurement[..., :3], measurement[..., 4])
+            target_along[mask], target_lr[mask] = along, lr
+            parts = self.coordinate_loss_fn(output[f'along_{step}'], output[f'lr_logits_{step}'],
+                                            target_along, target_lr, mask)
+            loss_parts['loss'] = loss_parts['loss'] + weight * parts['loss']
+            for component in ('loss', 'along_loss', 'lr_loss'):
+                self.log(f'{stage}_{name}_{component}', parts[component], on_step=False, on_epoch=True,
+                         batch_size=int(mask.sum()), sync_dist=True)
+            rmse = getattr(self, f'{stage}_{name}_along_rmse')
+            accuracy = getattr(self, f'{stage}_{name}_lr_accuracy')
+            rmse.update(output[f'along_{step}'], target_along, mask)
+            accuracy.update(output[f'lr_logits_{step}'], target_lr, mask)
+            self.log(f'{stage}_{name}_along_rmse_mm', rmse, on_step=False, on_epoch=True)
+            self.log(f'{stage}_{name}_lr_accuracy', accuracy, on_step=False, on_epoch=True)
 
     def training_step(self, batch, batch_idx):
         output = self(batch)
