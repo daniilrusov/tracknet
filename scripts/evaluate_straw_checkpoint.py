@@ -464,6 +464,8 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[StrawTrackN
         coordinate_scale=hparams.get("coordinate_scale", (750.0, 750.0, 120.0)),
         coordinate_representation=hparams.get("coordinate_representation", "cartesian"),
         along_coordinate_scale=float(hparams.get("along_coordinate_scale", 750.0)),
+        num_layers=int(hparams.get("num_layers", 2)),
+        gru_residual_norm=bool(hparams.get("gru_residual_norm", False)),
     )
     model_state = {
         key.removeprefix("model."): value

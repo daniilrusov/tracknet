@@ -84,19 +84,28 @@ def test_all_heads_use_same_seed_offset():
     assert targets.tolist() == [[2, 3]]
 
 
-@pytest.mark.parametrize('predict_coordinates', [False, True])
-def test_evaluator_loads_both_checkpoint_architectures(tmp_path, predict_coordinates):
-    module = StrawTrackNETModule(hidden_features=4, num_tubes=12, predict_coordinates=predict_coordinates)
+@pytest.mark.parametrize('num_layers,predict_coordinates,gru_residual_norm', [
+    (2, False, False), (2, True, False), (5, False, False), (5, False, True),
+])
+def test_evaluator_loads_checkpoint_architectures(tmp_path, num_layers, predict_coordinates, gru_residual_norm):
+    module = StrawTrackNETModule(
+        hidden_features=4, num_tubes=12, num_layers=num_layers, predict_coordinates=predict_coordinates,
+        gru_residual_norm=gru_residual_norm,
+    )
     path = tmp_path / 'model.ckpt'
     hparams = dict(module.hparams)
-    # Actual older checkpoints predate all tube-relative constructor options.
-    for key in ('coordinate_representation', 'along_coordinate_scale', 'lr_loss_weight'):
-        hparams.pop(key)
-    if not predict_coordinates:
-        for key in ('predict_coordinates', 'coordinate_center', 'coordinate_scale'):
+    if not gru_residual_norm:
+        hparams.pop('gru_residual_norm')
+    if num_layers == 2:
+        # Older checkpoints predate the depth setting and tube-relative options.
+        for key in ('num_layers', 'coordinate_representation', 'along_coordinate_scale', 'lr_loss_weight'):
             hparams.pop(key)
+        if not predict_coordinates:
+            for key in ('predict_coordinates', 'coordinate_center', 'coordinate_scale'):
+                hparams.pop(key)
     torch.save({'state_dict': module.state_dict(), 'hyper_parameters': hparams}, path)
     model, _ = load_model(path, torch.device('cpu'))
+    assert model.rnn.num_layers == num_layers
     assert model.predict_coordinates == predict_coordinates
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, module.model.state_dict()[key])

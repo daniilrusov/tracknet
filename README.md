@@ -93,6 +93,21 @@ Linux machine the complete generation-to-training sequence can be launched with:
 bash scripts/run_v3_1m_pipeline.sh
 ```
 
+With the V3 cache prepared, use these commands for the paired GRU experiment.
+The residual variant applies LayerNorm to the sum of the input and output of
+each of GRU layers 2–5. Both runs start from scratch and use the same V3 profile.
+
+```bash
+python -u train.py --config-name=train_v3_1m \
+  model.gru_residual_norm=false experiment.name=straw_gru5_baseline
+python -u train.py --config-name=train_v3_1m \
+  model.gru_residual_norm=true experiment.name=straw_gru5_residual_norm
+```
+
+Use the same `model.gru_residual_norm` value when resuming either run.
+To run the pair sequentially from a clean checkout, use
+`bash scripts/gru5_pair/run_pair.sh <checkout-with-venv-and-cache> <new-run-directory>`.
+
 Monitor training:
 
 ```bash
@@ -118,12 +133,12 @@ with two seed tubes is scored starting with the third tube.
 
 ## Results and Outputs
 
-StrawTrackNET supports two auxiliary position heads for the current and next
-hit alongside next-tube classification. The default V3 representation predicts
-one along-wire coordinate in mm and a left/right logit per hit. Legacy xyz
-checkpoints remain supported. See
-[`docs/straw_coordinate_heads.md`](docs/straw_coordinate_heads.md) for target
-alignment, losses, local smoke checks, and cache/checkpoint compatibility.
+The default StrawTrackNET configuration uses five GRU layers and predicts the
+next tube. Use a fresh run when switching from a two-layer checkpoint to this
+configuration. The evaluator reads the GRU depth from the checkpoint and assumes
+two layers for older checkpoints. See
+[`docs/straw_coordinate_heads.md`](docs/straw_coordinate_heads.md) for the
+optional coordinate-head experiments and their checkpoint compatibility.
 
 Training results are stored in `outputs/` with the following structure:
 

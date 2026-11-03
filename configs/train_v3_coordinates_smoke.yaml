@@ -1,6 +1,6 @@
-# Short local checks; the full run still uses train_v3_1m.
+# Short local checks for the coordinate-head experiment.
 defaults:
-  - train_v3_1m
+  - train_v3_tube_relative
   - _self_
 
 experiment:

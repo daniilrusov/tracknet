@@ -247,7 +247,9 @@ class StrawTrackNETModule(pl.LightningModule):
         lr_scheduler_threshold_mode: str = "rel",
         lr_scheduler_min_lr: float = 0.0,
         hit_density_stats_path: Optional[str] = None,
-        hits_normalizer: Optional[MinMaxNormalizeXYZ] = None
+        hits_normalizer: Optional[MinMaxNormalizeXYZ] = None,
+        num_layers: int = 2,
+        gru_residual_norm: bool = False,
     ):
         super().__init__()
         if seed_hits < 1:
@@ -286,6 +288,8 @@ class StrawTrackNETModule(pl.LightningModule):
             coordinate_scale=coordinate_scale,
             coordinate_representation=coordinate_representation,
             along_coordinate_scale=along_coordinate_scale,
+            num_layers=num_layers,
+            gru_residual_norm=gru_residual_norm,
         )
         if predict_coordinates and coordinate_representation == "tube_relative":
             if station_tube_counts is not None and tuple(station_tube_counts) != V3_TUBE_COUNTS:

@@ -7,4 +7,12 @@ experiment:
 dataset:
   cache_dir: ${user_settings.project_path}/outputs/drift_sim_v3_1m_coordinates_cache
 model:
+  num_layers: 2
+  predict_coordinates: true
   coordinate_representation: tube_relative
+  along_coordinate_scale: 750.0
+  lr_loss_weight: 1.0
+  coordinate_center: [0.0, 0.0, 120.0]
+  coordinate_scale: [750.0, 750.0, 120.0]
+  current_coordinate_loss_weight: 1.0
+  next_coordinate_loss_weight: 1.0

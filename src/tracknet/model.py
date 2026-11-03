@@ -2,6 +2,7 @@ from typing import TypedDict, NotRequired
 import math
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import PackedSequence
 
 
 class TrackPrediction(TypedDict):
@@ -139,6 +140,39 @@ class StepAheadTrackNET(nn.Module):
         )
 
 
+class ResidualGRU(nn.Module):
+    """Causal GRU stack with a normalized skip around each hidden-to-hidden layer."""
+
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int, batch_first: bool):
+        super().__init__()
+        if num_layers < 2:
+            raise ValueError("Residual GRU requires at least two layers.")
+        self.num_layers = num_layers
+        self.input_gru = nn.GRU(input_size, hidden_size, batch_first=batch_first)
+        self.residual_grus = nn.ModuleList(
+            nn.GRU(hidden_size, hidden_size, batch_first=batch_first)
+            for _ in range(num_layers - 1)
+        )
+        self.norms = nn.ModuleList(nn.LayerNorm(hidden_size) for _ in range(num_layers - 1))
+
+    def forward(self, inputs: torch.Tensor | PackedSequence):
+        sequence, state = self.input_gru(inputs)
+        states = [state]
+        for gru, norm in zip(self.residual_grus, self.norms, strict=True):
+            output, state = gru(sequence)
+            if isinstance(output, PackedSequence):
+                sequence = PackedSequence(
+                    norm(sequence.data + output.data),
+                    output.batch_sizes,
+                    output.sorted_indices,
+                    output.unsorted_indices,
+                )
+            else:
+                sequence = norm(sequence + output)
+            states.append(state)
+        return sequence, torch.cat(states, dim=0)
+
+
 class StrawTrackNET(nn.Module):
     """Causal GRU with a classifier and optional current/next position heads.
 
@@ -167,7 +201,9 @@ class StrawTrackNET(nn.Module):
                  coordinate_center=(0.0, 0.0, 120.0),
                  coordinate_scale=(750.0, 750.0, 120.0),
                  coordinate_representation: str = "cartesian",
-                 along_coordinate_scale: float = 750.0):
+                 along_coordinate_scale: float = 750.0,
+                 num_layers: int = 2,
+                 gru_residual_norm: bool = False):
         super().__init__()
         if num_tubes is None:
             num_tubes = output_features if output_features is not None else 8000
@@ -227,10 +263,11 @@ class StrawTrackNET(nn.Module):
             rnn_input_features = 4 + self.plane_embedding_dim
 
         self.rnn_input_features = rnn_input_features
-        self.rnn = nn.GRU(
+        gru_class = ResidualGRU if gru_residual_norm else nn.GRU
+        self.rnn = gru_class(
             input_size=rnn_input_features,
             hidden_size=hidden_features,
-            num_layers=2,
+            num_layers=num_layers,
             batch_first=batch_first
         )
 

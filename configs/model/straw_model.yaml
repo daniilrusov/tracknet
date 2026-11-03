@@ -2,6 +2,8 @@ _target_: src.tracknet.training.StrawTrackNETModule
 
 input_features: 5
 hidden_features: 1024
+num_layers: 5
+gru_residual_norm: false
 num_tubes: auto
 learning_rate: 0.0001
 batch_first: true
@@ -12,14 +14,7 @@ continuous_feature_center: [0.0, 0.0, 120.0, 2.5]
 continuous_feature_scale: [750.0, 750.0, 120.0, 2.5]
 # The first prediction included in loss is tube 3 after two seed tubes.
 seed_hits: 2
-predict_coordinates: true
-coordinate_representation: tube_relative
-along_coordinate_scale: 750.0
-lr_loss_weight: 1.0
-coordinate_center: [0.0, 0.0, 120.0]
-coordinate_scale: [750.0, 750.0, 120.0]
-current_coordinate_loss_weight: 1.0
-next_coordinate_loss_weight: 1.0
+predict_coordinates: false
 # Keep hard cross-entropy, then require the true tube to beat the M strongest
 # incorrect tubes from the same station by this logit margin.
 ranking_loss_weight: 0.25

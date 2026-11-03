@@ -78,8 +78,10 @@ xyz_*_given_measurement получены с геометрией и dr исти�
 
 ## Совместимость
 
-В configs/model/straw_model.yaml включён tube_relative. Для воспроизведения
-старой архитектуры задайте model.coordinate_representation=cartesian.
+По умолчанию `configs/model/straw_model.yaml` задаёт пятислойную GRU для
+классификации трубок. Конфигурация `train_v3_tube_relative` включает две
+координатные головы и двухслойную GRU. Для эксперимента с XYZ добавьте к ней
+`model.coordinate_representation=cartesian`.
 Конструкторы и evaluator считают отсутствующий параметр в старом checkpoint
 равным cartesian; старые classifier-only и xyz checkpoints продолжают работать.
 Новый режим нужно обучать с нуля: resume xyz-checkpoint как tube_relative

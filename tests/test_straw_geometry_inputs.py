@@ -39,6 +39,24 @@ def test_straw_model_rejects_legacy_lr_feature_in_new_schema():
         raise AssertionError("The new model unexpectedly accepted a sixth lr feature.")
 
 
+def test_residual_gru_matches_dense_evaluation_on_valid_steps():
+    model = StrawTrackNET(hidden_features=8, num_tubes=5, num_layers=5, gru_residual_norm=True)
+    lengths = torch.tensor([2, 4, 3])
+    valid = torch.arange(4) < lengths[:, None]
+    inputs = torch.randn(3, 4, 5)
+    inputs[..., 4] = torch.where(valid, torch.arange(1, 5), 0)
+
+    packed_logits = model(inputs, lengths.tolist())["tube_logits_t1"][valid]
+    dense_hidden, _ = model.rnn(model.encode_inputs(inputs))
+    dense_logits = model.predict_from_hidden(dense_hidden)["tube_logits_t1"][valid]
+    torch.testing.assert_close(packed_logits, dense_logits)
+
+    packed_logits.square().mean().backward()
+    for norm in model.rnn.norms:
+        assert norm.weight.grad is not None
+        assert torch.isfinite(norm.weight.grad).all()
+
+
 def test_straw_loss_is_hard_cross_entropy_on_the_true_tube_only():
     logits = torch.tensor([[[1.0, 2.0, -1.0], [0.5, -0.5, 1.5]]])
     targets = torch.tensor([[1, 2]])
