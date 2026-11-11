@@ -164,3 +164,9 @@ src/trackml-library/
 /data/
 /outputs
 *.zip
+
+/artifacts/
+/docs/
+/tmp/
+/notebooks/spd_eda.ipynb
+/tests/test_tracknet_teaching_generator.py

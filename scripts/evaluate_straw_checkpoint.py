@@ -219,7 +219,7 @@ class MetricStats:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True, help="Trusted Lightning checkpoint.")
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=4096)
@@ -335,6 +335,8 @@ def iter_complete_events(
     reader = pd.read_csv(**read_kwargs)
     try:
         for chunk in reader:
+            if chunk.empty:
+                continue
             if carry is not None and len(carry):
                 chunk = pd.concat([carry, chunk], ignore_index=True)
 
@@ -421,7 +423,8 @@ def batched(records: Iterable[TrackRecord], batch_size: int) -> Iterator[list[Tr
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[StrawTrackNET, dict]:
     try:
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # Trusted Lightning checkpoints can contain OmegaConf hyperparameters.
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     except ModuleNotFoundError as error:
         if error.name != "lightning_fabric":
             raise
@@ -443,7 +446,7 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[StrawTrackN
         sys.modules["lightning_fabric"] = fabric_module
         sys.modules["lightning_fabric.utilities"] = utilities_module
         sys.modules["lightning_fabric.utilities.data"] = data_module
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     hparams = checkpoint.get("hyper_parameters", checkpoint.get("hyperparameters", {}))
     use_plane_embedding = bool(hparams.get("use_plane_embedding", False))
     model = StrawTrackNET(
