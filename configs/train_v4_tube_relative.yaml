@@ -1,0 +1,11 @@
+defaults:
+  - train_v4_1m
+  - _self_
+
+experiment:
+  name: straw_tracknet_v4_1m_tube_relative
+
+model:
+  num_layers: 2
+  predict_coordinates: true
+  coordinate_representation: tube_relative

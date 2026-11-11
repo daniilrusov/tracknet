@@ -219,12 +219,12 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def load_config(path: Path) -> dict:
+def load_config(path: Path, *, defaults: dict | None = None) -> dict:
     with path.open("r", encoding="utf-8") as stream:
         loaded = yaml.safe_load(stream) or {}
     if not isinstance(loaded, dict):
         raise ValueError("YAML config must contain a mapping at the top level.")
-    return deep_merge(default_config(), loaded)
+    return deep_merge(default_config() if defaults is None else defaults, loaded)
 
 
 def normalize_config(config: dict, args: argparse.Namespace) -> dict:
@@ -268,7 +268,13 @@ def normalize_config(config: dict, args: argparse.Namespace) -> dict:
     return config
 
 
-def iter_rows(config: dict, geometry: DetectorGeometry, rng: random.Random):
+def iter_rows(
+    config: dict,
+    geometry: DetectorGeometry,
+    rng: random.Random,
+    *,
+    resample_misses: bool = False,
+):
     simulation = config["simulation"]
     vertex_min = float(simulation["vertex_min_mm"])
     vertex_max = float(simulation["vertex_max_mm"])
@@ -279,17 +285,20 @@ def iter_rows(config: dict, geometry: DetectorGeometry, rng: random.Random):
     pt_max = float(simulation["pt_max_mev"])
     phi_max = float(simulation["phi_max_rad"])
 
-    progress = tqdm(range(config["events"]), desc="Generating v3 events")
+    generator_version = config.get("generator_version", 3)
+    progress = tqdm(range(config["events"]), desc=f"Generating v{generator_version} events")
     for event_id in progress:
         vertex_x = rng.uniform(vertex_min, vertex_max)
         vertex_y = rng.uniform(vertex_min, vertex_max)
         track_count = int(rng.uniform(min_tracks, max_tracks))
 
-        for track_id in range(track_count):
+        track_id = 0
+        while track_id < track_count:
             pt = rng.uniform(pt_min, pt_max)
             phi = rng.uniform(0.0, phi_max)
             theta = math.acos(rng.uniform(0.0, 1.0))
             charge = 0
+            intersects_endcap = False
 
             for plane in geometry.planes:
                 x, y, z = line_extrapolate_to_z(
@@ -297,6 +306,7 @@ def iter_rows(config: dict, geometry: DetectorGeometry, rng: random.Random):
                 )
                 if abs(x) >= geometry.half_size or abs(y) >= geometry.half_size:
                     continue
+                intersects_endcap = True
                 if efficiency < 1.0 and rng.random() >= efficiency:
                     continue
 
@@ -326,14 +336,23 @@ def iter_rows(config: dict, geometry: DetectorGeometry, rng: random.Random):
                     "charge": charge,
                 }
 
+            if intersects_endcap or not resample_misses:
+                track_id += 1
 
-def write_data(path: Path, config: dict, geometry: DetectorGeometry) -> int:
+
+def write_data(
+    path: Path,
+    config: dict,
+    geometry: DetectorGeometry,
+    *,
+    resample_misses: bool = False,
+) -> int:
     rng = random.Random(config["seed"])
     row_count = 0
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=OUTPUT_COLUMNS, delimiter="\t")
         writer.writeheader()
-        for row in iter_rows(config, geometry, rng):
+        for row in iter_rows(config, geometry, rng, resample_misses=resample_misses):
             writer.writerow(row)
             row_count += 1
     return row_count
@@ -348,7 +367,7 @@ def sha256(path: Path) -> str:
 
 
 def metadata(config: dict, geometry: DetectorGeometry, data_path: Path, row_count: int) -> dict:
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "columns": OUTPUT_COLUMNS,
         "events_requested": config["events"],
@@ -375,6 +394,9 @@ def metadata(config: dict, geometry: DetectorGeometry, data_path: Path, row_coun
             ],
         },
     }
+    if "generator_version" in config:
+        result["generator_version"] = config["generator_version"]
+    return result
 
 
 def save_yaml(path: Path, value: dict) -> None:
@@ -382,9 +404,13 @@ def save_yaml(path: Path, value: dict) -> None:
         yaml.safe_dump(value, stream, sort_keys=False, allow_unicode=True)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("-c", "--config", default="configs/drift_sim_v3.yaml")
+def parse_args(
+    default_config_path: str = "configs/drift_sim_v3.yaml",
+    *,
+    description: str | None = __doc__,
+) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("-c", "--config", default=default_config_path)
     parser.add_argument("-o", "--output-dir")
     parser.add_argument("-n", "--events", type=int)
     parser.add_argument("--seed", type=int)
@@ -392,15 +418,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    config = normalize_config(load_config(Path(args.config)), args)
+def generate(config: dict, *, resample_misses: bool = False) -> None:
     geometry = build_detector_geometry(config["detector"])
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     data_path = output_dir / config["data_filename"]
 
-    row_count = write_data(data_path, config, geometry)
+    row_count = write_data(data_path, config, geometry, resample_misses=resample_misses)
     save_yaml(output_dir / config["config_filename"], config)
     save_yaml(
         output_dir / config["metadata_filename"],
@@ -413,6 +437,12 @@ def main() -> None:
     print(f"Data saved to: {data_path}")
     print(f"Rows: {row_count}")
     print(f"Total tube classes: {geometry.total_tubes}")
+
+
+def main() -> None:
+    args = parse_args()
+    config = normalize_config(load_config(Path(args.config)), args)
+    generate(config)
 
 
 if __name__ == "__main__":

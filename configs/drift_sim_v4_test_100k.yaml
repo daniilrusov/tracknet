@@ -1,0 +1,3 @@
+events: 100000
+seed: 20260830
+output_dir: outputs/test_v4_100k

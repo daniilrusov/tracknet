@@ -13,6 +13,29 @@ The corrected geometry is available in `scripts/driftsim_v3.py`. The original
 V1 and V2 generators are retained unchanged for reproducibility of existing
 datasets and checkpoints.
 
+DriftSim V4 places the eight endcap stations at `z = 1200–1440 mm`. It
+resamples tracks that miss every active station from the same event vertex
+until the requested track count is reached. V4 uses the existing TSV schema
+(`schema_version: 3`) and records `generator_version: 4` in `metadata.yaml`.
+
+```bash
+python scripts/driftsim_v4.py -n 1000
+python scripts/preprocess_drift_sim.py --schema-version v3 --input-dir outputs/drift_sim_v4 --output-dir outputs/drift_sim_v4_cache
+python train.py --config-name=train_v4_smoke
+```
+
+To train on one million V4 events, generate and preprocess the full sample
+with a 10% validation split by event:
+
+```bash
+python scripts/driftsim_v4.py --config configs/drift_sim_v4_1m.yaml
+python scripts/preprocess_drift_sim.py --schema-version v3 --input-dir outputs/drift_sim_v4_1m --output-dir outputs/drift_sim_v4_1m_cache --validation-split 0.1 --split-seed 42 --shard-size 100000
+python train.py --config-name=train_v4_1m model.num_layers=2
+```
+
+Use `train_v4_tube_relative` to train the coordinate heads from the same cache.
+Set `model.coordinate_representation=cartesian` for XYZ targets.
+
 ## Key Features
 
 - Sequential track building using RNN architecture

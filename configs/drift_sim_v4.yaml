@@ -1,0 +1,10 @@
+events: 100
+seed: 42
+output_dir: outputs/drift_sim_v4
+
+detector:
+  half_size_mm: 750.0
+  tube_pitch_mm: 10.0
+  z_min_mm: 1200.0
+  z_max_mm: 1440.0
+  plane_types: [X, Y, U, V, X, Y, U, V]

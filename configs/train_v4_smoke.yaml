@@ -1,0 +1,21 @@
+defaults:
+  - train_v4_1m
+  - override dataset: drift_sim_v4
+  - _self_
+
+experiment:
+  name: straw_tracknet_v4_smoke
+
+model:
+  hidden_features: 32
+
+training:
+  accelerator: cpu
+  batch_size: 128
+  max_epochs: 3
+  num_workers: 0
+  precision: 32-true
+  log_every_n_steps: 1
+  early_stopping_patience: null
+  limit_train_batches: 12
+  limit_val_batches: 4

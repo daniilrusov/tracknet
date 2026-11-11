@@ -1,0 +1,12 @@
+defaults:
+  - train_v3_1m
+  - override dataset: drift_sim_v4_1m
+  - _self_
+
+experiment:
+  name: straw_tracknet_v4_1m
+
+model:
+  # The V4 stations span z=1200..1440 mm.
+  continuous_feature_center: [0.0, 0.0, 1320.0, 2.5]
+  coordinate_center: [0.0, 0.0, 1320.0]
