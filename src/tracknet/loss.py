@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -212,14 +214,14 @@ class StrawPointInAreaLoss(nn.Module):
 
 
 class StrawTrackNetLoss(nn.Module):
-    """Cross-entropy with an optional same-station top-M ranking margin.
+    """Temperature-scaled cross-entropy with an optional same-station ranking margin.
 
     The ranking term directly optimizes the ordering that determines top-1:
     the true tube logit must exceed each of the M strongest incorrect logits
     from the target station by ``ranking_margin``. The hinge penalties are
     averaged, so changing M does not multiply the loss scale. Cross-entropy
-    remains the primary objective and continues to train the full 1456-class
-    distribution.
+    uses temperature-scaled logits over the full class distribution. The
+    ranking margin uses the original logits.
     """
 
     def __init__(
@@ -228,8 +230,11 @@ class StrawTrackNetLoss(nn.Module):
         ranking_margin: float = 0.5,
         ranking_top_m: int = 1,
         station_tube_counts: list[int] | tuple[int, ...] | None = None,
+        ce_temperature: float = 1.0,
     ):
         super().__init__()
+        if not math.isfinite(ce_temperature) or ce_temperature <= 0:
+            raise ValueError("ce_temperature must be finite and positive.")
         if ranking_loss_weight < 0:
             raise ValueError("ranking_loss_weight must be non-negative.")
         if ranking_margin < 0:
@@ -255,6 +260,7 @@ class StrawTrackNetLoss(nn.Module):
         self.ranking_margin = float(ranking_margin)
         self.ranking_top_m = int(ranking_top_m)
         self.station_tube_counts = station_tube_counts
+        self.ce_temperature = float(ce_temperature)
 
     def loss_components(
         self,
@@ -283,7 +289,10 @@ class StrawTrackNetLoss(nn.Module):
 
         flat_logits = logits[target_mask].float()
         flat_targets = targets[target_mask]
-        cross_entropy = F.cross_entropy(flat_logits, flat_targets)
+        cross_entropy = F.cross_entropy(
+            flat_logits if self.ce_temperature == 1.0 else flat_logits / self.ce_temperature,
+            flat_targets,
+        )
 
         if self.ranking_loss_weight == 0:
             zero = cross_entropy.new_zeros(())

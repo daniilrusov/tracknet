@@ -250,6 +250,7 @@ class StrawTrackNETModule(pl.LightningModule):
         hits_normalizer: Optional[MinMaxNormalizeXYZ] = None,
         num_layers: int = 2,
         gru_residual_norm: bool = False,
+        ce_temperature: float = 1.0,
     ):
         super().__init__()
         if seed_hits < 1:
@@ -301,6 +302,7 @@ class StrawTrackNETModule(pl.LightningModule):
             ranking_margin=ranking_margin,
             ranking_top_m=ranking_top_m,
             station_tube_counts=station_tube_counts,
+            ce_temperature=ce_temperature,
         )
 
         # Metrics

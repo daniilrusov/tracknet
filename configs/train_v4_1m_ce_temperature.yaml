@@ -1,0 +1,15 @@
+defaults:
+  - train_v4_1m
+  - _self_
+
+experiment:
+  name: straw_tracknet_v4_1m_ce_temperature
+
+model:
+  num_layers: 2
+  ce_temperature: 0.5
+  ranking_loss_weight: 0.0
+
+hydra:
+  run:
+    dir: outputs/${experiment.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

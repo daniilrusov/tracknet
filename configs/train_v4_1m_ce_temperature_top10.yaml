@@ -1,0 +1,10 @@
+defaults:
+  - train_v4_1m_ce_temperature
+  - _self_
+
+experiment:
+  name: straw_tracknet_v4_1m_ce_temperature_top10
+
+model:
+  ranking_loss_weight: 0.25
+  ranking_top_m: 10

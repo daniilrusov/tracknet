@@ -103,6 +103,31 @@ def test_straw_ranking_loss_uses_hardest_negative_from_target_station():
     assert logits.grad[0, 0, 3] == 0
 
 
+def test_straw_ce_temperature_scales_only_cross_entropy():
+    module = StrawTrackNETModule(
+        hidden_features=4,
+        num_tubes=24,
+        ranking_loss_weight=0.25,
+        ranking_margin=0.5,
+        ranking_top_m=10,
+        station_tube_counts=[12, 12],
+        ce_temperature=0.5,
+    )
+    station_logits = [1.0, 2.0, 1.9, 1.8, 1.7, 1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0]
+    logits = torch.tensor([[station_logits + [3.0] * 12]])
+    targets = torch.tensor([[0]])
+    mask = torch.tensor([[True]])
+
+    parts = module.loss_fn.loss_components({"tube_logits_t1": logits}, targets, mask)
+
+    expected_ce = F.cross_entropy(logits[mask] / 0.5, targets[mask])
+    expected_ranking = (0.5 + logits[0, 0, 1:11] - logits[0, 0, 0]).mean()
+    assert module.hparams.ce_temperature == 0.5
+    torch.testing.assert_close(parts["cross_entropy"], expected_ce)
+    torch.testing.assert_close(parts["ranking_loss"], expected_ranking)
+    torch.testing.assert_close(parts["loss"], expected_ce + 0.25 * expected_ranking)
+
+
 def test_straw_ranking_loss_is_zero_when_margin_is_satisfied():
     logits = torch.tensor([[[0.0, 2.0, 1.25, 20.0, 0.0]]])
     loss = StrawTrackNetLoss(
